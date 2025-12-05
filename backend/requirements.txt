@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+pydantic[dotenv]
+gitpython
+python-dotenv
+pytest
