@@ -13,11 +13,19 @@ IGNORE_DIRS = {
     ".vscode",
 }
 
-# File extensions we care about (can expand later)
+# File extensions → language mapping
+# This is the SINGLE source of truth for language detection
 EXTENSION_LANGUAGE_MAP = {
     ".py": "python",
     ".js": "javascript",
     ".ts": "typescript",
+    ".java": "java",
+    ".cpp": "cpp",
+    ".hpp": "cpp",
+    ".c": "c",
+    ".h": "c",
+    ".rs": "rust",
+    ".go": "go",
 }
 
 
@@ -30,7 +38,8 @@ def scan_repository(repo_path: Path) -> Dict:
             "repo": "<repo_name>",
             "languages": [...],
             "file_count": int,
-            "files": [...]
+            "files": [...],
+            "file_languages": { "<relative_path>": "<language>" }
         }
     """
 
@@ -39,24 +48,30 @@ def scan_repository(repo_path: Path) -> Dict:
 
     files: List[str] = []
     languages: Set[str] = set()
+    file_languages: Dict[str, str] = {}
 
     for path in repo_path.rglob("*"):
-    if path.is_dir():
-        continue
+        if path.is_dir():
+            continue
 
-    if any(part in IGNORE_DIRS for part in path.parts):
-        continue
+        # Skip files inside ignored directories
+        if any(part in IGNORE_DIRS for part in path.parts):
+            continue
 
-    suffix = path.suffix.lower()
+        suffix = path.suffix.lower()
 
-    if suffix in EXTENSION_LANGUAGE_MAP:
-        relative_path = path.relative_to(repo_path)
-        files.append(str(relative_path))
-        languages.add(EXTENSION_LANGUAGE_MAP[suffix])
+        if suffix in EXTENSION_LANGUAGE_MAP:
+            relative_path = str(path.relative_to(repo_path))
+            language = EXTENSION_LANGUAGE_MAP[suffix]
+
+            files.append(relative_path)
+            file_languages[relative_path] = language
+            languages.add(language)
 
     return {
         "repo": repo_path.name,
         "languages": sorted(languages),
         "file_count": len(files),
         "files": sorted(files),
+        "file_languages": file_languages,
     }
