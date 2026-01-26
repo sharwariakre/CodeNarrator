@@ -1,6 +1,11 @@
 from fastapi import APIRouter, HTTPException
+from pathlib import Path
+
 from app.models import IngestRepoRequest, IngestRepoResponse
 from app.services.git_service import clone_or_update_repo, GitCloneError
+from app.core.config import settings
+from app.services.ast.ast_service import extract_ast
+
 
 router = APIRouter(prefix="/repos", tags=["repos"])
 
@@ -24,3 +29,22 @@ async def ingest_repo(payload: IngestRepoRequest):
         local_path=str(local_path),
         status="ready"
     )
+
+@router.get("/{repo_slug}/ast/python")
+def get_python_ast(repo_slug: str):
+    repo_path = Path(settings.REPO_BASE_DIR) / repo_slug
+
+    if not repo_path.exists():
+        raise HTTPException(status_code=404, detail="Repository not found")
+
+    try:
+        result = extract_ast(repo_path=repo_path, language="python")
+        if result is None:
+            raise HTTPException(
+                status_code=400,
+                detail="AST extraction not supported for Python",
+            )
+        return result
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))

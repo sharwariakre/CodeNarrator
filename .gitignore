@@ -1,1 +1,8 @@
 /backend/venv/*
+# Python bytecode
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+/backend/data/
