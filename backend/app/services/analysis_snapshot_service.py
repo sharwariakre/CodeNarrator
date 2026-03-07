@@ -1,6 +1,8 @@
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
+from app.services.repo_scanner import EXTENSION_LANGUAGE_MAP
+from app.services.repo_metadata import ENTRY_POINT_FILES
 from app.services.repo_metadata import extract_repo_metadata
 from app.services.repo_scanner import scan_repository
 
@@ -44,6 +46,104 @@ def build_analysis_snapshot(repo_path: Path) -> Dict:
         "unknowns": unknowns,
         "confidence": confidence,
         "analysis_state": analysis_state,
+    }
+
+
+def advance_analysis_state(current_state: Dict) -> Dict:
+    """
+    Advance analysis by one deterministic step.
+
+    The function is local-first and stateless: it consumes current state and
+    returns the next state without persistence.
+    """
+    next_state = {
+        "repo_id": current_state["repo_id"],
+        "explored_files": list(current_state.get("explored_files", [])),
+        "candidate_files": [dict(c) for c in current_state.get("candidate_files", [])],
+        "unknowns": list(current_state.get("unknowns", [])),
+        "current_summary": dict(current_state["current_summary"]),
+        "confidence": float(current_state.get("confidence", 0.0)),
+        "stop_reason": current_state.get("stop_reason"),
+    }
+
+    candidate_file = _select_next_candidate(next_state)
+    if candidate_file is None:
+        next_state["stop_reason"] = "No remaining candidate files to inspect."
+        return next_state
+
+    inspected = _inspect_file(next_state, candidate_file)
+    if inspected is None:
+        next_state["stop_reason"] = f"Candidate file is unavailable: {candidate_file}"
+        next_state["candidate_files"] = [
+            c for c in next_state["candidate_files"] if c["file_path"] != candidate_file
+        ]
+        return next_state
+
+    next_state["explored_files"].append(candidate_file)
+    next_state["candidate_files"] = [
+        c for c in next_state["candidate_files"] if c["file_path"] != candidate_file
+    ]
+
+    unknowns_before = list(next_state["unknowns"])
+    _refine_summary(next_state, inspected)
+    _reduce_unknowns(next_state, inspected)
+    _add_follow_up_candidates(next_state, inspected)
+    _update_confidence(next_state, unknowns_before)
+
+    if not next_state["candidate_files"]:
+        next_state["stop_reason"] = "No more meaningful candidates available."
+    else:
+        next_state["stop_reason"] = None
+
+    return next_state
+
+
+def run_analysis_loop(initial_state: Dict, max_steps: int = 5) -> Dict:
+    """
+    Run deterministic multi-step analysis until stop condition or max_steps.
+    """
+    steps_limit = max(1, min(max_steps, 25))
+    current_state = _copy_state(initial_state)
+    initial_explored_len = len(current_state.get("explored_files", []))
+
+    step_trace: List[Dict] = []
+    for step in range(1, steps_limit + 1):
+        if current_state.get("stop_reason"):
+            break
+        if not current_state.get("candidate_files"):
+            current_state["stop_reason"] = "No more meaningful candidates available."
+            break
+
+        previous_explored = list(current_state.get("explored_files", []))
+        next_state = advance_analysis_state(current_state)
+        explored_file = _newly_explored_file(previous_explored, next_state["explored_files"])
+
+        step_trace.append(
+            {
+                "step": step,
+                "explored_file": explored_file,
+                "confidence": next_state["confidence"],
+                "remaining_candidates": len(next_state["candidate_files"]),
+                "stop_reason": next_state.get("stop_reason"),
+            }
+        )
+
+        current_state = next_state
+
+        if current_state.get("stop_reason"):
+            break
+
+    explored_files_in_order = current_state["explored_files"][initial_explored_len:]
+
+    return {
+        "steps_executed": len(step_trace),
+        "explored_files_in_order": explored_files_in_order,
+        "step_trace": step_trace,
+        "final_summary": current_state["current_summary"],
+        "final_confidence": current_state["confidence"],
+        "remaining_unknowns": current_state["unknowns"],
+        "stop_reason": current_state.get("stop_reason"),
+        "final_state": current_state,
     }
 
 
@@ -284,3 +384,128 @@ def _ambiguity_reducing_candidates(
         )
 
     return candidates
+
+
+def _select_next_candidate(state: Dict) -> str | None:
+    explored = set(state["explored_files"])
+    for candidate in state["candidate_files"]:
+        file_path = candidate["file_path"]
+        if file_path not in explored:
+            return file_path
+    return None
+
+
+def _copy_state(state: Dict) -> Dict:
+    return {
+        "repo_id": state["repo_id"],
+        "explored_files": list(state.get("explored_files", [])),
+        "candidate_files": [dict(c) for c in state.get("candidate_files", [])],
+        "unknowns": list(state.get("unknowns", [])),
+        "current_summary": dict(state["current_summary"]),
+        "confidence": float(state.get("confidence", 0.0)),
+        "stop_reason": state.get("stop_reason"),
+    }
+
+
+def _newly_explored_file(previous: List[str], current: List[str]) -> str | None:
+    if len(current) <= len(previous):
+        return None
+    return current[-1]
+
+
+def _inspect_file(state: Dict, file_path: str) -> Dict | None:
+    repo_path = Path(state["current_summary"]["local_path"])
+    target = (repo_path / file_path).resolve()
+
+    if not target.exists() or not target.is_file():
+        return None
+    if not target.is_relative_to(repo_path.resolve()):
+        return None
+
+    suffix = target.suffix.lower()
+    language = EXTENSION_LANGUAGE_MAP.get(suffix, "unknown")
+    top_level_dir = Path(file_path).parts[0] if Path(file_path).parts else ""
+    line_count = len(target.read_text(encoding="utf-8", errors="ignore").splitlines())
+
+    return {
+        "file_path": file_path,
+        "name": target.name,
+        "language": language,
+        "top_level_dir": top_level_dir,
+        "line_count": line_count,
+    }
+
+
+def _refine_summary(state: Dict, inspected: Dict) -> None:
+    summary = state["current_summary"]
+    file_path = inspected["file_path"]
+    file_name = inspected["name"]
+    top_level_dir = inspected["top_level_dir"]
+
+    if file_name in ENTRY_POINT_FILES and file_path not in summary["entry_points"]:
+        summary["entry_points"] = sorted(summary["entry_points"] + [file_path])
+
+    if top_level_dir and top_level_dir not in summary["top_level_dirs"]:
+        summary["top_level_dirs"] = sorted(summary["top_level_dirs"] + [top_level_dir])
+
+
+def _reduce_unknowns(state: Dict, inspected: Dict) -> None:
+    file_name = inspected["name"]
+
+    if file_name in ENTRY_POINT_FILES:
+        state["unknowns"] = [
+            u
+            for u in state["unknowns"]
+            if u != "No obvious entry points found by filename heuristics."
+        ]
+
+    if state["current_summary"]["top_level_dirs"]:
+        state["unknowns"] = [
+            u for u in state["unknowns"] if u != "Top-level structure signals are limited."
+        ]
+
+
+def _add_follow_up_candidates(state: Dict, inspected: Dict) -> None:
+    repo_path = Path(state["current_summary"]["local_path"]).resolve()
+    inspected_path = Path(inspected["file_path"])
+    parent_dir = inspected_path.parent
+
+    if str(parent_dir) == ".":
+        return
+
+    explored = set(state["explored_files"])
+    existing = {c["file_path"] for c in state["candidate_files"]}
+    added = 0
+
+    for sibling in sorted((repo_path / parent_dir).glob("*")):
+        if added >= 2:
+            break
+        if not sibling.is_file():
+            continue
+
+        rel_path = str(sibling.relative_to(repo_path))
+        if rel_path == inspected["file_path"]:
+            continue
+        if rel_path in explored or rel_path in existing:
+            continue
+        if sibling.suffix.lower() not in EXTENSION_LANGUAGE_MAP:
+            continue
+
+        state["candidate_files"].append(
+            {
+                "file_path": rel_path,
+                "reason": "Sibling module of inspected file for local context expansion.",
+            }
+        )
+        existing.add(rel_path)
+        added += 1
+
+
+def _update_confidence(state: Dict, unknowns_before: List[str]) -> None:
+    confidence = float(state["confidence"])
+    confidence += 0.04
+
+    if len(state["unknowns"]) < len(unknowns_before):
+        confidence += 0.03
+
+    state["confidence"] = round(max(0.0, min(confidence, 0.95)), 2)

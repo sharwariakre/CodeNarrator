@@ -48,3 +48,27 @@ class RepoAnalysisSnapshotResponse(BaseModel):
     unknowns: list[str]
     confidence: float
     analysis_state: AnalysisState
+
+
+class AnalysisLoopRequest(BaseModel):
+    analysis_state: AnalysisState
+    max_steps: int = 5
+
+
+class AnalysisStepTrace(BaseModel):
+    step: int
+    explored_file: str | None
+    confidence: float
+    remaining_candidates: int
+    stop_reason: str | None
+
+
+class AnalysisLoopResponse(BaseModel):
+    steps_executed: int
+    explored_files_in_order: list[str]
+    step_trace: list[AnalysisStepTrace]
+    final_summary: RepoSummary
+    final_confidence: float
+    remaining_unknowns: list[str]
+    stop_reason: str | None
+    final_state: AnalysisState
