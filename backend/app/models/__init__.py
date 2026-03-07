@@ -5,6 +5,7 @@ from .repo_models import (
     AnalysisStepTrace,
     IngestRepoRequest,
     IngestRepoResponse,
+    InspectedFileFact,
     RepoAnalysisSnapshotRequest,
     RepoAnalysisSnapshotResponse,
 )

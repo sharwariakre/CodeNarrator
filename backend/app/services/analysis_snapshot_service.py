@@ -2,7 +2,7 @@ from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
 from app.services.repo_scanner import EXTENSION_LANGUAGE_MAP
-from app.services.repo_metadata import ENTRY_POINT_FILES
+from app.services.repo_metadata import ENTRY_POINT_FILES, KNOWN_TOP_LEVEL_DIRS
 from app.services.repo_metadata import extract_repo_metadata
 from app.services.repo_scanner import scan_repository
 
@@ -23,6 +23,8 @@ def build_analysis_snapshot(repo_path: Path) -> Dict:
         "language_breakdown": metadata["language_breakdown"],
         "top_level_dirs": metadata["top_level_dirs"],
         "entry_points": metadata["entry_points"],
+        "inspected_languages": [],
+        "inspected_role_hints": [],
     }
 
     next_candidates = _build_next_candidates(scan_result, metadata, limit=5)
@@ -34,11 +36,15 @@ def build_analysis_snapshot(repo_path: Path) -> Dict:
         "repo_id": scan_result["repo"],
         "explored_files": [],
         "candidate_files": next_candidates,
+        "inspected_facts": [],
         "unknowns": unknowns,
         "current_summary": repo_summary,
         "confidence": confidence,
+        "no_progress_steps": 0,
         "stop_reason": stop_reason,
     }
+    _refresh_candidates_for_signal(analysis_state, limit=5)
+    next_candidates = analysis_state["candidate_files"]
 
     return {
         "repo_summary": repo_summary,
@@ -60,9 +66,11 @@ def advance_analysis_state(current_state: Dict) -> Dict:
         "repo_id": current_state["repo_id"],
         "explored_files": list(current_state.get("explored_files", [])),
         "candidate_files": [dict(c) for c in current_state.get("candidate_files", [])],
+        "inspected_facts": [dict(f) for f in current_state.get("inspected_facts", [])],
         "unknowns": list(current_state.get("unknowns", [])),
         "current_summary": dict(current_state["current_summary"]),
         "confidence": float(current_state.get("confidence", 0.0)),
+        "no_progress_steps": int(current_state.get("no_progress_steps", 0)),
         "stop_reason": current_state.get("stop_reason"),
     }
 
@@ -84,13 +92,32 @@ def advance_analysis_state(current_state: Dict) -> Dict:
         c for c in next_state["candidate_files"] if c["file_path"] != candidate_file
     ]
 
+    summary_before = _summary_progress_signature(next_state["current_summary"])
     unknowns_before = list(next_state["unknowns"])
-    _refine_summary(next_state, inspected)
-    _reduce_unknowns(next_state, inspected)
-    _add_follow_up_candidates(next_state, inspected)
-    _update_confidence(next_state, unknowns_before)
 
-    if not next_state["candidate_files"]:
+    fact_evidence = _record_inspected_fact(next_state, inspected)
+    summary_evidence = _refine_summary(next_state, inspected)
+    unknowns_cleared = _reduce_unknowns(next_state, inspected)
+    confidence_evidence = _update_confidence(
+        next_state,
+        summary_evidence=summary_evidence,
+        unknowns_cleared=unknowns_cleared,
+        fact_evidence=fact_evidence,
+    )
+    _refresh_candidates_for_signal(next_state, limit=8)
+
+    summary_changed = _summary_progress_signature(next_state["current_summary"]) != summary_before
+    unknowns_changed = next_state["unknowns"] != unknowns_before
+    meaningful_progress = summary_changed or unknowns_changed or confidence_evidence
+
+    if meaningful_progress:
+        next_state["no_progress_steps"] = 0
+    else:
+        next_state["no_progress_steps"] += 1
+
+    if next_state["no_progress_steps"] >= 2:
+        next_state["stop_reason"] = "No meaningful progress in 2 consecutive steps."
+    elif not next_state["candidate_files"]:
         next_state["stop_reason"] = "No more meaningful candidates available."
     else:
         next_state["stop_reason"] = None
@@ -400,9 +427,11 @@ def _copy_state(state: Dict) -> Dict:
         "repo_id": state["repo_id"],
         "explored_files": list(state.get("explored_files", [])),
         "candidate_files": [dict(c) for c in state.get("candidate_files", [])],
+        "inspected_facts": [dict(f) for f in state.get("inspected_facts", [])],
         "unknowns": list(state.get("unknowns", [])),
         "current_summary": dict(state["current_summary"]),
         "confidence": float(state.get("confidence", 0.0)),
+        "no_progress_steps": int(state.get("no_progress_steps", 0)),
         "stop_reason": state.get("stop_reason"),
     }
 
@@ -426,6 +455,8 @@ def _inspect_file(state: Dict, file_path: str) -> Dict | None:
     language = EXTENSION_LANGUAGE_MAP.get(suffix, "unknown")
     top_level_dir = Path(file_path).parts[0] if Path(file_path).parts else ""
     line_count = len(target.read_text(encoding="utf-8", errors="ignore").splitlines())
+    role_hint = _infer_role_hint(file_path)
+    line_count_bucket = _line_count_bucket(line_count)
 
     return {
         "file_path": file_path,
@@ -433,24 +464,48 @@ def _inspect_file(state: Dict, file_path: str) -> Dict | None:
         "language": language,
         "top_level_dir": top_level_dir,
         "line_count": line_count,
+        "line_count_bucket": line_count_bucket,
+        "directory": str(Path(file_path).parent),
+        "role_hint": role_hint,
     }
 
 
-def _refine_summary(state: Dict, inspected: Dict) -> None:
+def _refine_summary(state: Dict, inspected: Dict) -> Dict[str, bool]:
     summary = state["current_summary"]
     file_path = inspected["file_path"]
     file_name = inspected["name"]
     top_level_dir = inspected["top_level_dir"]
+    language = inspected["language"]
+    role_hint = inspected["role_hint"]
+
+    evidence = {
+        "new_entry_point": False,
+        "new_top_level_signal": False,
+        "new_summary_fact": False,
+    }
 
     if file_name in ENTRY_POINT_FILES and file_path not in summary["entry_points"]:
         summary["entry_points"] = sorted(summary["entry_points"] + [file_path])
+        evidence["new_entry_point"] = True
 
     if top_level_dir and top_level_dir not in summary["top_level_dirs"]:
         summary["top_level_dirs"] = sorted(summary["top_level_dirs"] + [top_level_dir])
+        evidence["new_top_level_signal"] = True
+
+    if language not in summary["inspected_languages"]:
+        summary["inspected_languages"] = sorted(summary["inspected_languages"] + [language])
+        evidence["new_summary_fact"] = True
+
+    if role_hint not in summary["inspected_role_hints"]:
+        summary["inspected_role_hints"] = sorted(summary["inspected_role_hints"] + [role_hint])
+        evidence["new_summary_fact"] = True
+
+    return evidence
 
 
-def _reduce_unknowns(state: Dict, inspected: Dict) -> None:
+def _reduce_unknowns(state: Dict, inspected: Dict) -> int:
     file_name = inspected["name"]
+    unknowns_before = list(state["unknowns"])
 
     if file_name in ENTRY_POINT_FILES:
         state["unknowns"] = [
@@ -464,48 +519,198 @@ def _reduce_unknowns(state: Dict, inspected: Dict) -> None:
             u for u in state["unknowns"] if u != "Top-level structure signals are limited."
         ]
 
+    inspected_languages = {
+        fact["language"]
+        for fact in state.get("inspected_facts", [])
+        if fact.get("language") and fact["language"] != "unknown"
+    }
+    if len(inspected_languages) >= 2:
+        state["unknowns"] = [
+            u for u in state["unknowns"] if u != "Mixed-language boundaries are not analyzed yet."
+        ]
 
-def _add_follow_up_candidates(state: Dict, inspected: Dict) -> None:
-    repo_path = Path(state["current_summary"]["local_path"]).resolve()
-    inspected_path = Path(inspected["file_path"])
-    parent_dir = inspected_path.parent
-
-    if str(parent_dir) == ".":
-        return
-
-    explored = set(state["explored_files"])
-    existing = {c["file_path"] for c in state["candidate_files"]}
-    added = 0
-
-    for sibling in sorted((repo_path / parent_dir).glob("*")):
-        if added >= 2:
-            break
-        if not sibling.is_file():
-            continue
-
-        rel_path = str(sibling.relative_to(repo_path))
-        if rel_path == inspected["file_path"]:
-            continue
-        if rel_path in explored or rel_path in existing:
-            continue
-        if sibling.suffix.lower() not in EXTENSION_LANGUAGE_MAP:
-            continue
-
-        state["candidate_files"].append(
-            {
-                "file_path": rel_path,
-                "reason": "Sibling module of inspected file for local context expansion.",
-            }
-        )
-        existing.add(rel_path)
-        added += 1
+    return len(unknowns_before) - len(state["unknowns"])
 
 
-def _update_confidence(state: Dict, unknowns_before: List[str]) -> None:
+def _update_confidence(
+    state: Dict,
+    *,
+    summary_evidence: Dict[str, bool],
+    unknowns_cleared: int,
+    fact_evidence: Dict[str, bool],
+) -> bool:
     confidence = float(state["confidence"])
-    confidence += 0.04
+    delta = 0.0
 
-    if len(state["unknowns"]) < len(unknowns_before):
-        confidence += 0.03
+    if summary_evidence["new_entry_point"]:
+        delta += 0.10
+    if summary_evidence["new_top_level_signal"]:
+        delta += 0.05
+    if unknowns_cleared > 0:
+        delta += min(0.09, 0.03 * unknowns_cleared)
+    if summary_evidence["new_summary_fact"] or fact_evidence["materially_new_fact"]:
+        delta += 0.04
 
-    state["confidence"] = round(max(0.0, min(confidence, 0.95)), 2)
+    state["confidence"] = round(max(0.0, min(confidence + delta, 0.95)), 2)
+    return delta > 0
+
+
+def _record_inspected_fact(state: Dict, inspected: Dict) -> Dict[str, bool]:
+    facts = state["inspected_facts"]
+
+    existing_languages = {f["language"] for f in facts}
+    existing_roles = {f["role_hint"] for f in facts}
+    existing_dirs = {f["directory"] for f in facts}
+    existing_buckets = {f["line_count_bucket"] for f in facts}
+
+    new_fact = {
+        "file_path": inspected["file_path"],
+        "language": inspected["language"],
+        "line_count_bucket": inspected["line_count_bucket"],
+        "directory": inspected["directory"],
+        "role_hint": inspected["role_hint"],
+    }
+    facts.append(new_fact)
+
+    materially_new_fact = (
+        inspected["language"] not in existing_languages
+        or inspected["role_hint"] not in existing_roles
+        or inspected["directory"] not in existing_dirs
+        or inspected["line_count_bucket"] not in existing_buckets
+    )
+    return {"materially_new_fact": materially_new_fact}
+
+
+def _refresh_candidates_for_signal(state: Dict, limit: int) -> None:
+    repo_path = Path(state["current_summary"]["local_path"]).resolve()
+    scan_result = scan_repository(repo_path)
+    files: List[str] = scan_result["files"]
+    file_languages: Dict[str, str] = scan_result["file_languages"]
+    explored = set(state["explored_files"])
+
+    scored: List[Tuple[Tuple[int, str], Dict]] = []
+    for file_path in files:
+        if file_path in explored:
+            continue
+
+        score, reasons = _candidate_signal_score(state, file_path, file_languages)
+        if score <= 0:
+            continue
+        scored.append(
+            (
+                (-score, file_path),
+                {
+                    "file_path": file_path,
+                    "reason": "; ".join(reasons),
+                },
+            )
+        )
+
+    scored.sort(key=lambda item: item[0])
+
+    candidates = [candidate for _, candidate in scored[:limit]]
+    if not candidates:
+        fallback = sorted(fp for fp in files if fp not in explored)[:limit]
+        candidates = [
+            {
+                "file_path": file_path,
+                "reason": "Fallback candidate (deterministic unexplored source file).",
+            }
+            for file_path in fallback
+        ]
+
+    state["candidate_files"] = candidates
+
+
+def _candidate_signal_score(
+    state: Dict,
+    file_path: str,
+    file_languages: Dict[str, str],
+) -> Tuple[int, List[str]]:
+    name = Path(file_path).name
+    top_level_dir = Path(file_path).parts[0] if Path(file_path).parts else ""
+    language = file_languages.get(file_path, "unknown")
+    role_hint = _infer_role_hint(file_path)
+
+    inspected_facts = state.get("inspected_facts", [])
+    inspected_languages = {f["language"] for f in inspected_facts}
+    inspected_roles = {f["role_hint"] for f in inspected_facts}
+    inspected_dirs = {f["directory"] for f in inspected_facts}
+    unresolved_unknowns = set(state.get("unknowns", []))
+    summary = state["current_summary"]
+
+    score = 0
+    reasons: List[str] = []
+
+    if name in ENTRY_POINT_FILES and file_path not in summary["entry_points"]:
+        score += 8
+        reasons.append("entry-point heuristic")
+
+    if (
+        "No obvious entry points found by filename heuristics." in unresolved_unknowns
+        and role_hint == "entry_point"
+    ):
+        score += 5
+        reasons.append("can reduce entry-point ambiguity")
+
+    if language not in inspected_languages:
+        score += 4
+        reasons.append(f"new language signal ({language})")
+
+    directory_signal = str(Path(file_path).parent)
+    if directory_signal not in inspected_dirs:
+        score += 3
+        reasons.append("new directory context")
+
+    if role_hint not in inspected_roles:
+        score += 2
+        reasons.append(f"new file role ({role_hint})")
+
+    if role_hint == "central":
+        score += 4
+        reasons.append("central architecture hint")
+    elif role_hint == "module":
+        score += 1
+
+    if top_level_dir in KNOWN_TOP_LEVEL_DIRS and top_level_dir not in summary["top_level_dirs"]:
+        score += 2
+        reasons.append(f"new top-level domain signal ({top_level_dir})")
+
+    if top_level_dir in {"docs", "tests"}:
+        score -= 2
+
+    if role_hint == "test":
+        score -= 2
+        if "No obvious entry points found by filename heuristics." in unresolved_unknowns:
+            score += 1
+            reasons.append("test can clarify behavior when entry point is unclear")
+
+    return score, reasons
+
+
+def _summary_progress_signature(summary: Dict) -> Tuple[Tuple[str, ...], ...]:
+    return (
+        tuple(summary.get("entry_points", [])),
+        tuple(summary.get("top_level_dirs", [])),
+        tuple(summary.get("inspected_languages", [])),
+        tuple(summary.get("inspected_role_hints", [])),
+    )
+
+
+def _line_count_bucket(line_count: int) -> str:
+    if line_count < 80:
+        return "small"
+    if line_count < 300:
+        return "medium"
+    return "large"
+
+
+def _infer_role_hint(file_path: str) -> str:
+    file_name = Path(file_path).name
+    if file_name in ENTRY_POINT_FILES:
+        return "entry_point"
+    if "test" in file_name.lower() or "/tests/" in f"/{file_path}" or file_path.startswith("tests/"):
+        return "test"
+    if file_name in {"config.py", "settings.py", "routes.py", "api.py", "models.py"}:
+        return "central"
+    return "module"

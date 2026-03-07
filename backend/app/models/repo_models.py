@@ -1,4 +1,4 @@
-from pydantic import BaseModel, HttpUrl
+from pydantic import BaseModel, Field, HttpUrl
 
 
 class IngestRepoRequest(BaseModel):
@@ -30,15 +30,27 @@ class RepoSummary(BaseModel):
     language_breakdown: dict[str, int]
     top_level_dirs: list[str]
     entry_points: list[str]
+    inspected_languages: list[str] = Field(default_factory=list)
+    inspected_role_hints: list[str] = Field(default_factory=list)
+
+
+class InspectedFileFact(BaseModel):
+    file_path: str
+    language: str
+    line_count_bucket: str
+    directory: str
+    role_hint: str
 
 
 class AnalysisState(BaseModel):
     repo_id: str
     explored_files: list[str]
     candidate_files: list[SnapshotCandidate]
+    inspected_facts: list[InspectedFileFact] = Field(default_factory=list)
     unknowns: list[str]
     current_summary: RepoSummary
     confidence: float
+    no_progress_steps: int = 0
     stop_reason: str | None = None
 
 
