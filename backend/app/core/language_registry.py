@@ -59,4 +59,37 @@ LANGUAGE_REGISTRY: Dict[str, LanguageCapabilities] = {
     },
     "cpp": {
         "has_ast": False,
-        "parser_backend": ParserBac_
+        "parser_backend": ParserBackend.NONE,
+        "supports_import_graph": False,
+        "supports_entry_points": True,
+        "status": "unknown",
+    },
+    "c": {
+        "has_ast": False,
+        "parser_backend": ParserBackend.NONE,
+        "supports_import_graph": False,
+        "supports_entry_points": True,
+        "status": "unknown",
+    },
+    "rust": {
+        "has_ast": False,
+        "parser_backend": ParserBackend.NONE,
+        "supports_import_graph": False,
+        "supports_entry_points": True,
+        "status": "unknown",
+    },
+    "go": {
+        "has_ast": False,
+        "parser_backend": ParserBackend.NONE,
+        "supports_import_graph": False,
+        "supports_entry_points": True,
+        "status": "unknown",
+    },
+    "unknown": {
+        "has_ast": False,
+        "parser_backend": ParserBackend.NONE,
+        "supports_import_graph": False,
+        "supports_entry_points": False,
+        "status": "unknown",
+    },
+}
