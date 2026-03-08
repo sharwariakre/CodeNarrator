@@ -7,6 +7,8 @@ from app.models import (
     AnalysisLoopResponse,
     IngestRepoRequest,
     IngestRepoResponse,
+    InterpretArchitectureRequest,
+    InterpretArchitectureResponse,
     RepoAnalysisSnapshotRequest,
     RepoAnalysisSnapshotResponse,
 )
@@ -15,6 +17,7 @@ from app.services.analysis_snapshot_service import (
     build_analysis_snapshot,
     run_analysis_loop,
 )
+from app.services.ai_interpreter import interpret_architecture
 
 router = APIRouter(prefix="/repos", tags=["repos"])
 
@@ -88,6 +91,12 @@ async def run_repo_snapshot_loop(payload: AnalysisLoopRequest):
         max_steps=payload.max_steps,
     )
     return AnalysisLoopResponse(**loop_result)
+
+
+@router.post("/interpret", response_model=InterpretArchitectureResponse)
+async def interpret_repo_architecture(payload: InterpretArchitectureRequest):
+    interpretation = interpret_architecture(payload.final_state.model_dump())
+    return InterpretArchitectureResponse(interpretation=interpretation)
 
 
 def _resolve_local_path(local_path: str) -> Path:

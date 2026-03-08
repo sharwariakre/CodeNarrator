@@ -6,6 +6,8 @@ from .repo_models import (
     DependencyEdge,
     IngestRepoRequest,
     IngestRepoResponse,
+    InterpretArchitectureRequest,
+    InterpretArchitectureResponse,
     InspectedFileFact,
     RepoAnalysisSnapshotRequest,
     RepoAnalysisSnapshotResponse,
