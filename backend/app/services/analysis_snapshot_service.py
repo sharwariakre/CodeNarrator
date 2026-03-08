@@ -254,31 +254,31 @@ def _build_unknowns(scan_result: Dict, metadata: Dict) -> List[str]:
 
 
 def _compute_confidence(scan_result: Dict, metadata: Dict) -> float:
-    score = 0.35
+    score = 0.20
 
     file_count = scan_result["file_count"]
     languages = scan_result["languages"]
 
     if file_count > 0:
-        score += 0.20
+        score += 0.12
     if file_count >= 20:
-        score += 0.10
+        score += 0.08
     elif file_count < 5:
-        score -= 0.10
+        score -= 0.08
 
     if len(languages) == 1:
-        score += 0.15
+        score += 0.10
     elif len(languages) > 1:
-        score += 0.05
+        score += 0.04
 
     if metadata["entry_points"]:
-        score += 0.15
-    if metadata["top_level_dirs"]:
         score += 0.10
+    if metadata["top_level_dirs"]:
+        score += 0.08
     if metadata["repo_type"] == "mixed":
         score -= 0.10
 
-    score = max(0.0, min(score, 0.95))
+    score = max(0.0, min(score, 0.70))
     return round(score, 2)
 
 
