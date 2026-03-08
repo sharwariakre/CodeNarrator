@@ -93,3 +93,11 @@ class AnalysisLoopResponse(BaseModel):
     stop_reason: str | None
     dependency_graph_summary: dict
     final_state: AnalysisState
+
+
+class InterpretArchitectureRequest(BaseModel):
+    final_state: AnalysisState
+
+
+class InterpretArchitectureResponse(BaseModel):
+    interpretation: dict | None
