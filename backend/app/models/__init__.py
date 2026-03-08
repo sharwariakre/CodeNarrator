@@ -4,6 +4,8 @@ from .repo_models import (
     AnalysisState,
     AnalysisStepTrace,
     DependencyEdge,
+    GenerateReportRequest,
+    GenerateReportResponse,
     IngestRepoRequest,
     IngestRepoResponse,
     InterpretArchitectureRequest,

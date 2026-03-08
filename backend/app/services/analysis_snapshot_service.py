@@ -167,6 +167,7 @@ def run_analysis_loop(initial_state: Dict, max_steps: int = 5) -> Dict:
             break
 
     explored_files_in_order = current_state["explored_files"][initial_explored_len:]
+    current_state["dependency_graph_summary"] = _compute_dependency_graph_summary(current_state)
 
     return {
         "steps_executed": len(step_trace),
