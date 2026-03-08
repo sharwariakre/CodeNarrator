@@ -1,3 +1,6 @@
+import ast
+import re
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
@@ -37,6 +40,7 @@ def build_analysis_snapshot(repo_path: Path) -> Dict:
         "explored_files": [],
         "candidate_files": next_candidates,
         "inspected_facts": [],
+        "dependency_edges": [],
         "unknowns": unknowns,
         "current_summary": repo_summary,
         "confidence": confidence,
@@ -67,6 +71,7 @@ def advance_analysis_state(current_state: Dict) -> Dict:
         "explored_files": list(current_state.get("explored_files", [])),
         "candidate_files": [dict(c) for c in current_state.get("candidate_files", [])],
         "inspected_facts": [dict(f) for f in current_state.get("inspected_facts", [])],
+        "dependency_edges": [dict(e) for e in current_state.get("dependency_edges", [])],
         "unknowns": list(current_state.get("unknowns", [])),
         "current_summary": dict(current_state["current_summary"]),
         "confidence": float(current_state.get("confidence", 0.0)),
@@ -96,6 +101,7 @@ def advance_analysis_state(current_state: Dict) -> Dict:
     unknowns_before = list(next_state["unknowns"])
 
     fact_evidence = _record_inspected_fact(next_state, inspected)
+    _record_dependency_edge(next_state, inspected)
     summary_evidence = _refine_summary(next_state, inspected)
     unknowns_cleared = _reduce_unknowns(next_state, inspected)
     confidence_evidence = _update_confidence(
@@ -170,6 +176,7 @@ def run_analysis_loop(initial_state: Dict, max_steps: int = 5) -> Dict:
         "final_confidence": current_state["confidence"],
         "remaining_unknowns": current_state["unknowns"],
         "stop_reason": current_state.get("stop_reason"),
+        "dependency_graph_summary": _compute_dependency_graph_summary(current_state),
         "final_state": current_state,
     }
 
@@ -428,6 +435,7 @@ def _copy_state(state: Dict) -> Dict:
         "explored_files": list(state.get("explored_files", [])),
         "candidate_files": [dict(c) for c in state.get("candidate_files", [])],
         "inspected_facts": [dict(f) for f in state.get("inspected_facts", [])],
+        "dependency_edges": [dict(e) for e in state.get("dependency_edges", [])],
         "unknowns": list(state.get("unknowns", [])),
         "current_summary": dict(state["current_summary"]),
         "confidence": float(state.get("confidence", 0.0)),
@@ -454,9 +462,14 @@ def _inspect_file(state: Dict, file_path: str) -> Dict | None:
     suffix = target.suffix.lower()
     language = EXTENSION_LANGUAGE_MAP.get(suffix, "unknown")
     top_level_dir = Path(file_path).parts[0] if Path(file_path).parts else ""
-    line_count = len(target.read_text(encoding="utf-8", errors="ignore").splitlines())
+    content = target.read_text(encoding="utf-8", errors="ignore")
+    line_count = len(content.splitlines())
     role_hint = _infer_role_hint(file_path)
     line_count_bucket = _line_count_bucket(line_count)
+    imported_modules = _extract_imports_for_file(
+        content=content,
+        language=language,
+    )
 
     return {
         "file_path": file_path,
@@ -467,6 +480,7 @@ def _inspect_file(state: Dict, file_path: str) -> Dict | None:
         "line_count_bucket": line_count_bucket,
         "directory": str(Path(file_path).parent),
         "role_hint": role_hint,
+        "imported_modules": imported_modules,
     }
 
 
@@ -562,6 +576,9 @@ def _record_inspected_fact(state: Dict, inspected: Dict) -> Dict[str, bool]:
     existing_roles = {f["role_hint"] for f in facts}
     existing_dirs = {f["directory"] for f in facts}
     existing_buckets = {f["line_count_bucket"] for f in facts}
+    existing_imports = {
+        module for fact in facts for module in fact.get("imported_modules", [])
+    }
 
     new_fact = {
         "file_path": inspected["file_path"],
@@ -569,16 +586,39 @@ def _record_inspected_fact(state: Dict, inspected: Dict) -> Dict[str, bool]:
         "line_count_bucket": inspected["line_count_bucket"],
         "directory": inspected["directory"],
         "role_hint": inspected["role_hint"],
+        "imports_found": len(inspected.get("imported_modules", [])),
+        "imported_modules": inspected.get("imported_modules", []),
     }
     facts.append(new_fact)
 
+    imported_modules = inspected.get("imported_modules", [])
     materially_new_fact = (
         inspected["language"] not in existing_languages
         or inspected["role_hint"] not in existing_roles
         or inspected["directory"] not in existing_dirs
         or inspected["line_count_bucket"] not in existing_buckets
+        or any(module not in existing_imports for module in imported_modules)
     )
     return {"materially_new_fact": materially_new_fact}
+
+
+def _record_dependency_edge(state: Dict, inspected: Dict) -> None:
+    source = inspected["file_path"]
+    imports = inspected.get("imported_modules", [])
+    dedup_imports = sorted(set(imports))
+
+    edges = state["dependency_edges"]
+    for edge in edges:
+        if edge["source"] == source:
+            edge["imports"] = dedup_imports
+            return
+
+    edges.append(
+        {
+            "source": source,
+            "imports": dedup_imports,
+        }
+    )
 
 
 def _refresh_candidates_for_signal(state: Dict, limit: int) -> None:
@@ -695,6 +735,238 @@ def _summary_progress_signature(summary: Dict) -> Tuple[Tuple[str, ...], ...]:
         tuple(summary.get("inspected_languages", [])),
         tuple(summary.get("inspected_role_hints", [])),
     )
+
+
+def _extract_imports_for_file(*, content: str, language: str) -> List[str]:
+    if language == "python":
+        return _extract_python_imports(content)
+    if language in {"javascript", "typescript"}:
+        return _extract_javascript_imports(content)
+    return []
+
+
+def _extract_python_imports(content: str) -> List[str]:
+    imports: List[str] = []
+    seen: Set[str] = set()
+
+    try:
+        tree = ast.parse(content)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    name = alias.name.strip()
+                    if name and name not in seen:
+                        imports.append(name)
+                        seen.add(name)
+            elif isinstance(node, ast.ImportFrom):
+                level = node.level or 0
+                module = (node.module or "").strip()
+                if level > 0:
+                    imported = "." * level + module if module else "." * level
+                else:
+                    imported = module
+                if imported and imported not in seen:
+                    imports.append(imported)
+                    seen.add(imported)
+        return imports
+    except SyntaxError:
+        return _extract_python_imports_regex_fallback(content)
+
+
+def _extract_python_imports_regex_fallback(content: str) -> List[str]:
+    imports: List[str] = []
+    seen: Set[str] = set()
+
+    for match in re.finditer(r"^\s*import\s+([A-Za-z0-9_.,\s]+)", content, re.MULTILINE):
+        modules = [m.strip() for m in match.group(1).split(",")]
+        for module in modules:
+            if module and module not in seen:
+                imports.append(module)
+                seen.add(module)
+
+    for match in re.finditer(r"^\s*from\s+([.\w]+)\s+import\s+", content, re.MULTILINE):
+        module = match.group(1).strip()
+        if module and module not in seen:
+            imports.append(module)
+            seen.add(module)
+
+    return imports
+
+
+def _extract_javascript_imports(content: str) -> List[str]:
+    imports: List[str] = []
+    seen: Set[str] = set()
+
+    patterns = [
+        r'import\s+[^;\n]*?\sfrom\s+["\']([^"\']+)["\']',
+        r'import\s+["\']([^"\']+)["\']',
+        r'require\(\s*["\']([^"\']+)["\']\s*\)',
+    ]
+
+    for pattern in patterns:
+        for match in re.finditer(pattern, content):
+            module = match.group(1).strip()
+            if module and module not in seen:
+                imports.append(module)
+                seen.add(module)
+
+    return imports
+
+
+def _compute_dependency_graph_summary(state: Dict) -> Dict:
+    edges = state.get("dependency_edges", [])
+    repo_path = Path(state["current_summary"]["local_path"]).resolve()
+
+    imported_counter: Counter[str] = Counter()
+    file_import_counts: List[Dict] = []
+    cluster_map: Dict[str, Set[str]] = defaultdict(set)
+    internal_edge_set: Set[Tuple[str, str]] = set()
+
+    for edge in edges:
+        source = edge["source"]
+        imports = sorted(set(edge.get("imports", [])))
+
+        for module in imports:
+            imported_counter[module] += 1
+            cluster_key = _cluster_key(module)
+            if cluster_key:
+                cluster_map[cluster_key].add(source)
+
+            resolved_internal = _resolve_internal_import(
+                repo_path=repo_path,
+                source_file=source,
+                import_specifier=module,
+            )
+            if resolved_internal is not None:
+                internal_edge_set.add((source, resolved_internal))
+
+        file_import_counts.append(
+            {
+                "source": source,
+                "imports_count": len(imports),
+            }
+        )
+
+    most_imported_modules = [
+        {"module": module, "count": count}
+        for module, count in sorted(imported_counter.items(), key=lambda item: (-item[1], item[0]))[:10]
+    ]
+
+    highest_dependency_files = sorted(
+        file_import_counts,
+        key=lambda item: (-item["imports_count"], item["source"]),
+    )[:10]
+
+    clusters = []
+    for cluster_key, files in sorted(cluster_map.items(), key=lambda item: (-len(item[1]), item[0])):
+        if len(files) < 2:
+            continue
+        clusters.append(
+            {
+                "cluster": cluster_key,
+                "files": sorted(files),
+            }
+        )
+
+    internal_edges = [
+        {"from": source, "to": target}
+        for source, target in sorted(internal_edge_set)
+    ]
+
+    return {
+        "most_imported_modules": most_imported_modules,
+        "highest_dependency_files": highest_dependency_files,
+        "clusters": clusters,
+        "internal_edges": internal_edges,
+    }
+
+
+def _cluster_key(module: str) -> str:
+    if not module:
+        return ""
+    if module.startswith("."):
+        return "relative"
+    if "/" in module:
+        return module.split("/", 1)[0]
+    if "." in module:
+        return module.split(".", 1)[0]
+    return module
+
+
+def _resolve_internal_import(
+    *,
+    repo_path: Path,
+    source_file: str,
+    import_specifier: str,
+) -> str | None:
+    source_abs = (repo_path / source_file).resolve()
+    source_dir = source_abs.parent
+
+    if _is_js_relative_import(import_specifier):
+        resolved = _resolve_js_relative_import(repo_path, source_dir, import_specifier)
+        return str(resolved.relative_to(repo_path)) if resolved else None
+
+    if _is_python_relative_import(import_specifier):
+        resolved = _resolve_python_relative_import(repo_path, source_dir, import_specifier)
+        return str(resolved.relative_to(repo_path)) if resolved else None
+
+    return None
+
+
+def _is_js_relative_import(import_specifier: str) -> bool:
+    return import_specifier.startswith("./") or import_specifier.startswith("../")
+
+
+def _is_python_relative_import(import_specifier: str) -> bool:
+    return import_specifier.startswith(".")
+
+
+def _resolve_js_relative_import(repo_path: Path, source_dir: Path, import_specifier: str) -> Path | None:
+    candidate_base = (source_dir / import_specifier).resolve()
+    return _resolve_candidate_path(repo_path, candidate_base, [".js", ".jsx", ".ts", ".tsx"])
+
+
+def _resolve_python_relative_import(repo_path: Path, source_dir: Path, import_specifier: str) -> Path | None:
+    level = 0
+    for ch in import_specifier:
+        if ch == ".":
+            level += 1
+        else:
+            break
+
+    module = import_specifier[level:]
+    target_dir = source_dir
+    for _ in range(max(0, level - 1)):
+        target_dir = target_dir.parent
+
+    candidate_base = target_dir / module.replace(".", "/") if module else target_dir
+    return _resolve_candidate_path(repo_path, candidate_base, [".py"])
+
+
+def _resolve_candidate_path(repo_path: Path, candidate_base: Path, extensions: List[str]) -> Path | None:
+    candidates: List[Path] = []
+
+    candidates.append(candidate_base)
+    for ext in extensions:
+        candidates.append(candidate_base.with_suffix(ext))
+    for ext in extensions:
+        candidates.append(candidate_base / f"index{ext}")
+    candidates.append(candidate_base / "__init__.py")
+
+    seen: Set[str] = set()
+    for candidate in candidates:
+        key = str(candidate)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        if not candidate.exists() or not candidate.is_file():
+            continue
+        if not candidate.resolve().is_relative_to(repo_path):
+            continue
+        return candidate.resolve()
+
+    return None
 
 
 def _line_count_bucket(line_count: int) -> str:

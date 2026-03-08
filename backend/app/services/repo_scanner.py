@@ -18,6 +18,7 @@ IGNORE_DIRS = {
 EXTENSION_LANGUAGE_MAP = {
     ".py": "python",
     ".js": "javascript",
+    ".jsx": "javascript",
     ".ts": "typescript",
     ".java": "java",
     ".cpp": "cpp",

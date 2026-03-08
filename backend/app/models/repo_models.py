@@ -40,6 +40,13 @@ class InspectedFileFact(BaseModel):
     line_count_bucket: str
     directory: str
     role_hint: str
+    imports_found: int = 0
+    imported_modules: list[str] = Field(default_factory=list)
+
+
+class DependencyEdge(BaseModel):
+    source: str
+    imports: list[str] = Field(default_factory=list)
 
 
 class AnalysisState(BaseModel):
@@ -47,6 +54,7 @@ class AnalysisState(BaseModel):
     explored_files: list[str]
     candidate_files: list[SnapshotCandidate]
     inspected_facts: list[InspectedFileFact] = Field(default_factory=list)
+    dependency_edges: list[DependencyEdge] = Field(default_factory=list)
     unknowns: list[str]
     current_summary: RepoSummary
     confidence: float
@@ -83,4 +91,5 @@ class AnalysisLoopResponse(BaseModel):
     final_confidence: float
     remaining_unknowns: list[str]
     stop_reason: str | None
+    dependency_graph_summary: dict
     final_state: AnalysisState
