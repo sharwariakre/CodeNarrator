@@ -17,9 +17,8 @@ def _build_report_payload(final_state: Dict, interpretation: Dict | None) -> Dic
     summary = final_state.get("current_summary", {})
     graph_summary = _compute_dependency_graph_summary(final_state)
     inspected_facts = final_state.get("inspected_facts", [])
-    explored_files = final_state.get("explored_files", [])
-
     fact_map = {fact.get("file_path"): fact for fact in inspected_facts}
+    node_file_paths = [fact.get("file_path") for fact in inspected_facts if fact.get("file_path")]
     cluster_lookup: Dict[str, str] = {}
     for cluster in graph_summary.get("clusters", []):
         label = cluster.get("cluster", "unclustered")
@@ -27,21 +26,21 @@ def _build_report_payload(final_state: Dict, interpretation: Dict | None) -> Dic
             cluster_lookup[file_path] = label
 
     internal_edges = graph_summary.get("internal_edges", [])
-    explored_set = set(explored_files)
+    explored_set = set(node_file_paths)
     visible_edges = [
         {"source": edge["from"], "target": edge["to"]}
         for edge in internal_edges
         if edge.get("from") in explored_set and edge.get("to") in explored_set
     ]
 
-    incoming_count: Dict[str, int] = {file_path: 0 for file_path in explored_files}
+    incoming_count: Dict[str, int] = {file_path: 0 for file_path in node_file_paths}
     for edge in visible_edges:
-        target = edge.get("to")
+        target = edge.get("target")
         if target in incoming_count:
             incoming_count[target] += 1
 
     nodes = []
-    for file_path in explored_files:
+    for file_path in node_file_paths:
         fact = fact_map.get(file_path, {})
         nodes.append(
             {
@@ -157,7 +156,7 @@ def _render_html(payload: Dict) -> str:
     }}
     #graph {{
       width: 100%;
-      height: 560px;
+      height: 680px;
       border: 1px solid var(--line);
       border-radius: 10px;
       background: #fff;
@@ -217,7 +216,7 @@ def _render_html(payload: Dict) -> str:
 
     <section class="panel">
       <h2>Dependency Graph</h2>
-      <svg id="graph" width="100%" height="560"></svg>
+      <svg id="graph" width="100%" height="680"></svg>
       <div class="legend">Node size = incoming internal dependencies. Color = cluster.</div>
     </section>
 
@@ -303,7 +302,7 @@ def _render_html(payload: Dict) -> str:
     const svg = d3.select("#graph");
     const bbox = svg.node().getBoundingClientRect();
     const width = bbox.width || 960;
-    const height = bbox.height || 560;
+    const height = bbox.height || 680;
     const tooltip = d3.select("#tooltip");
 
     const clusterDomain = [...new Set(nodes.map(n => n.cluster))];
@@ -315,13 +314,27 @@ def _render_html(payload: Dict) -> str:
       .force("center", d3.forceCenter(width / 2, height / 2))
       .force("collide", d3.forceCollide().radius(d => 8 + (d.in_degree || 0) * 2));
 
+    const defs = svg.append("defs");
+    defs.append("marker")
+      .attr("id", "arrowhead")
+      .attr("viewBox", "0 -5 10 10")
+      .attr("refX", 20)
+      .attr("refY", 0)
+      .attr("markerWidth", 6)
+      .attr("markerHeight", 6)
+      .attr("orient", "auto")
+      .append("path")
+      .attr("d", "M0,-5L10,0L0,5")
+      .attr("fill", "#9ca3af");
+
     svg.append("g")
       .attr("stroke", "#9ca3af")
       .attr("stroke-opacity", 0.7)
       .selectAll("line")
       .data(links)
       .join("line")
-      .attr("stroke-width", 1.4);
+      .attr("stroke-width", 1.4)
+      .attr("marker-end", "url(#arrowhead)");
 
     const node = svg.append("g")
       .attr("stroke", "#fff")
@@ -329,7 +342,7 @@ def _render_html(payload: Dict) -> str:
       .selectAll("circle")
       .data(nodes)
       .join("circle")
-      .attr("r", d => 6 + Math.min(14, (d.in_degree || 0) * 2))
+      .attr("r", d => 10 + Math.min(14, (d.in_degree || 0) * 2))
       .attr("fill", d => color(d.cluster))
       .call(d3.drag()
         .on("start", dragstarted)
@@ -348,6 +361,16 @@ def _render_html(payload: Dict) -> str:
       }})
       .on("mouseleave", () => tooltip.style("opacity", 0));
 
+    const labels = svg.append("g")
+      .selectAll("text")
+      .data(nodes)
+      .join("text")
+      .text(d => d.id.split("/").pop())
+      .attr("font-size", "11px")
+      .attr("fill", "#374151")
+      .attr("dx", 12)
+      .attr("dy", 4);
+
     simulation.on("tick", () => {{
       svg.selectAll("line")
         .attr("x1", d => d.source.x)
@@ -358,6 +381,10 @@ def _render_html(payload: Dict) -> str:
       node
         .attr("cx", d => d.x)
         .attr("cy", d => d.y);
+
+      labels
+        .attr("x", d => d.x)
+        .attr("y", d => d.y);
     }});
 
     function dragstarted(event, d) {{
