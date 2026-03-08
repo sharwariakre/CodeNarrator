@@ -3,6 +3,7 @@ from .repo_models import (
     AnalysisLoopResponse,
     AnalysisState,
     AnalysisStepTrace,
+    DependencyEdge,
     IngestRepoRequest,
     IngestRepoResponse,
     InspectedFileFact,
