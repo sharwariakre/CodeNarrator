@@ -1,10 +1,13 @@
 from pathlib import Path
+import re
 
 from fastapi import APIRouter, HTTPException
 from app.core.config import settings
 from app.models import (
     AnalysisLoopRequest,
     AnalysisLoopResponse,
+    GenerateReportRequest,
+    GenerateReportResponse,
     IngestRepoRequest,
     IngestRepoResponse,
     InterpretArchitectureRequest,
@@ -18,6 +21,7 @@ from app.services.analysis_snapshot_service import (
     run_analysis_loop,
 )
 from app.services.ai_interpreter import interpret_architecture
+from app.services.report_generator import generate_html_report
 
 router = APIRouter(prefix="/repos", tags=["repos"])
 
@@ -99,6 +103,20 @@ async def interpret_repo_architecture(payload: InterpretArchitectureRequest):
     return InterpretArchitectureResponse(interpretation=interpretation)
 
 
+@router.post("/report", response_model=GenerateReportResponse)
+async def generate_repo_report(payload: GenerateReportRequest):
+    reports_dir = _resolve_reports_dir()
+    safe_name = _sanitize_output_filename(payload.output_filename)
+    output_path = reports_dir / safe_name
+
+    saved_path = generate_html_report(
+        final_state=payload.final_state.model_dump(),
+        interpretation=payload.interpretation,
+        output_path=output_path,
+    )
+    return GenerateReportResponse(report_path=str(saved_path))
+
+
 def _resolve_local_path(local_path: str) -> Path:
     requested_path = Path(local_path).expanduser()
     if not requested_path.is_absolute():
@@ -111,3 +129,17 @@ def _resolve_repo_base_dir() -> Path:
     if not repo_base_dir.is_absolute():
         return (Path.cwd() / repo_base_dir).resolve()
     return repo_base_dir.resolve()
+
+
+def _resolve_reports_dir() -> Path:
+    repo_base = _resolve_repo_base_dir()
+    return (repo_base.parent / "reports").resolve()
+
+
+def _sanitize_output_filename(name: str) -> str:
+    cleaned = re.sub(r"[^a-zA-Z0-9._-]+", "-", name).strip("-.")
+    if not cleaned:
+        cleaned = "architecture-report"
+    if not cleaned.endswith(".html"):
+        cleaned = f"{cleaned}.html"
+    return cleaned

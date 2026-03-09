@@ -55,6 +55,7 @@ class AnalysisState(BaseModel):
     candidate_files: list[SnapshotCandidate]
     inspected_facts: list[InspectedFileFact] = Field(default_factory=list)
     dependency_edges: list[DependencyEdge] = Field(default_factory=list)
+    dependency_graph_summary: dict = Field(default_factory=dict)
     unknowns: list[str]
     current_summary: RepoSummary
     confidence: float
@@ -101,3 +102,13 @@ class InterpretArchitectureRequest(BaseModel):
 
 class InterpretArchitectureResponse(BaseModel):
     interpretation: dict | None
+
+
+class GenerateReportRequest(BaseModel):
+    final_state: AnalysisState
+    interpretation: dict | None = None
+    output_filename: str
+
+
+class GenerateReportResponse(BaseModel):
+    report_path: str
