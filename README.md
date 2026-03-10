@@ -69,6 +69,11 @@ Given a repo like `https://github.com/user/project`, CodeNarrator produces:
 ```
 
 ---
+## Example Report
+
+![CodeNarrator dependency graph for Dead-Serious](docs/assets/dependency-mapping.png)
+
+---
 
 ## Architecture
 
