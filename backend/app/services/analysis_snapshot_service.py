@@ -16,6 +16,7 @@ def build_analysis_snapshot(repo_path: Path) -> Dict:
     """
     scan_result = scan_repository(repo_path)
     metadata = extract_repo_metadata(repo_path, scan_result)
+    package_roots = _detect_python_package_roots(repo_path, scan_result["files"])
 
     repo_summary = {
         "repo": scan_result["repo"],
@@ -42,6 +43,7 @@ def build_analysis_snapshot(repo_path: Path) -> Dict:
         "inspected_facts": [],
         "dependency_edges": [],
         "unknowns": unknowns,
+        "package_roots": package_roots,
         "current_summary": repo_summary,
         "confidence": confidence,
         "no_progress_steps": 0,
@@ -73,6 +75,7 @@ def advance_analysis_state(current_state: Dict) -> Dict:
         "inspected_facts": [dict(f) for f in current_state.get("inspected_facts", [])],
         "dependency_edges": [dict(e) for e in current_state.get("dependency_edges", [])],
         "unknowns": list(current_state.get("unknowns", [])),
+        "package_roots": list(current_state.get("package_roots", [])),
         "current_summary": dict(current_state["current_summary"]),
         "confidence": float(current_state.get("confidence", 0.0)),
         "no_progress_steps": int(current_state.get("no_progress_steps", 0)),
@@ -438,6 +441,7 @@ def _copy_state(state: Dict) -> Dict:
         "inspected_facts": [dict(f) for f in state.get("inspected_facts", [])],
         "dependency_edges": [dict(e) for e in state.get("dependency_edges", [])],
         "unknowns": list(state.get("unknowns", [])),
+        "package_roots": list(state.get("package_roots", [])),
         "current_summary": dict(state["current_summary"]),
         "confidence": float(state.get("confidence", 0.0)),
         "no_progress_steps": int(state.get("no_progress_steps", 0)),
@@ -817,6 +821,8 @@ def _extract_javascript_imports(content: str) -> List[str]:
 def _compute_dependency_graph_summary(state: Dict) -> Dict:
     edges = state.get("dependency_edges", [])
     repo_path = Path(state["current_summary"]["local_path"]).resolve()
+    scanned_files = set(scan_repository(repo_path)["files"])
+    package_roots = [Path(root) for root in state.get("package_roots", [])]
 
     imported_counter: Counter[str] = Counter()
     file_import_counts: List[Dict] = []
@@ -837,6 +843,8 @@ def _compute_dependency_graph_summary(state: Dict) -> Dict:
                 repo_path=repo_path,
                 source_file=source,
                 import_specifier=module,
+                package_roots=package_roots,
+                scanned_files=scanned_files,
             )
             if resolved_internal is not None:
                 internal_edge_set.add((source, resolved_internal))
@@ -899,6 +907,8 @@ def _resolve_internal_import(
     repo_path: Path,
     source_file: str,
     import_specifier: str,
+    package_roots: List[Path],
+    scanned_files: Set[str],
 ) -> str | None:
     source_abs = (repo_path / source_file).resolve()
     source_dir = source_abs.parent
@@ -910,6 +920,11 @@ def _resolve_internal_import(
     if _is_python_relative_import(import_specifier):
         resolved = _resolve_python_relative_import(repo_path, source_dir, import_specifier)
         return str(resolved.relative_to(repo_path)) if resolved else None
+
+    if _should_attempt_absolute_python_resolution(import_specifier, package_roots, scanned_files):
+        resolved = _resolve_absolute_import(import_specifier, package_roots, scanned_files)
+        if resolved is not None:
+            return resolved
 
     return None
 
@@ -942,6 +957,99 @@ def _resolve_python_relative_import(repo_path: Path, source_dir: Path, import_sp
 
     candidate_base = target_dir / module.replace(".", "/") if module else target_dir
     return _resolve_candidate_path(repo_path, candidate_base, [".py"])
+
+
+def _detect_python_package_roots(repo_path: Path, scanned_files: List[str]) -> List[str]:
+    package_roots: List[str] = []
+    scanned_set = set(scanned_files)
+    repo_has_python = any(path.endswith(".py") for path in scanned_files)
+    if not repo_has_python:
+        return package_roots
+
+    has_src_layout = any(path.startswith("src/") for path in scanned_files) and any(
+        path.startswith("src/") and path.endswith("/__init__.py")
+        for path in scanned_files
+    )
+    if has_src_layout:
+        package_roots.append("src")
+
+    flat_package_dirs = sorted(
+        {
+            Path(path).parts[0]
+            for path in scanned_files
+            if len(Path(path).parts) >= 2 and path.endswith("/__init__.py")
+        }
+    )
+    if flat_package_dirs:
+        package_roots.append(".")
+
+    unique_roots: List[str] = []
+    seen: Set[str] = set()
+    for root in package_roots:
+        if root not in seen:
+            unique_roots.append(root)
+            seen.add(root)
+
+    return unique_roots
+
+
+def _should_attempt_absolute_python_resolution(
+    import_specifier: str,
+    package_roots: List[Path],
+    scanned_files: Set[str],
+) -> bool:
+    if not import_specifier or not package_roots:
+        return False
+
+    first_segment = import_specifier.split(".", 1)[0]
+    if not first_segment:
+        return False
+
+    known_top_level_names = _known_top_level_package_names(package_roots, scanned_files)
+    return first_segment in known_top_level_names
+
+
+def _resolve_absolute_import(
+    module_string: str,
+    package_roots: List[Path],
+    scanned_files: Set[str],
+) -> str | None:
+    module_path = module_string.replace(".", "/")
+
+    for package_root in package_roots:
+        root_prefix = package_root.as_posix().strip(".")
+        if root_prefix:
+            file_candidate = f"{root_prefix}/{module_path}.py"
+            init_candidate = f"{root_prefix}/{module_path}/__init__.py"
+        else:
+            file_candidate = f"{module_path}.py"
+            init_candidate = f"{module_path}/__init__.py"
+
+        if file_candidate in scanned_files:
+            return file_candidate
+        if init_candidate in scanned_files:
+            return init_candidate
+
+    return None
+
+
+def _known_top_level_package_names(package_roots: List[Path], scanned_files: Set[str]) -> Set[str]:
+    names: Set[str] = set()
+    for package_root in package_roots:
+        root_prefix = package_root.as_posix().strip(".")
+        for file_path in scanned_files:
+            parts = Path(file_path).parts
+            if not parts:
+                continue
+            if root_prefix:
+                root_parts = tuple(Path(root_prefix).parts)
+                if parts[: len(root_parts)] != root_parts:
+                    continue
+                if len(parts) > len(root_parts):
+                    names.add(parts[len(root_parts)])
+            else:
+                names.add(parts[0])
+    return names
 
 
 def _resolve_candidate_path(repo_path: Path, candidate_base: Path, extensions: List[str]) -> Path | None:
