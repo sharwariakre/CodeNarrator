@@ -56,6 +56,7 @@ class AnalysisState(BaseModel):
     inspected_facts: list[InspectedFileFact] = Field(default_factory=list)
     dependency_edges: list[DependencyEdge] = Field(default_factory=list)
     dependency_graph_summary: dict = Field(default_factory=dict)
+    package_roots: list[str] = Field(default_factory=list)
     unknowns: list[str]
     current_summary: RepoSummary
     confidence: float
