@@ -139,7 +139,7 @@ def advance_analysis_state(current_state: Dict) -> Dict:
     return next_state
 
 
-def run_analysis_loop(initial_state: Dict, max_steps: int = 5) -> Dict:
+def run_analysis_loop(initial_state: Dict, max_steps: int = 15) -> Dict:
     """
     Run deterministic multi-step analysis until stop condition or max_steps.
     """
@@ -638,12 +638,13 @@ def _refresh_candidates_for_signal(state: Dict, limit: int) -> None:
     file_languages: Dict[str, str] = scan_result["file_languages"]
     explored = set(state["explored_files"])
 
+    known_targets = _resolved_import_targets(state)
     scored: List[Tuple[Tuple[int, str], Dict]] = []
     for file_path in files:
         if file_path in explored:
             continue
 
-        score, reasons = _candidate_signal_score(state, file_path, file_languages)
+        score, reasons = _candidate_signal_score(state, file_path, file_languages, known_targets)
         if score <= 0:
             continue
         scored.append(
@@ -689,6 +690,7 @@ def _candidate_signal_score(
     state: Dict,
     file_path: str,
     file_languages: Dict[str, str],
+    known_targets: Set[str] | None = None,
 ) -> Tuple[int, List[str]]:
     name = Path(file_path).name
     top_level_dir = Path(file_path).parts[0] if Path(file_path).parts else ""
@@ -745,7 +747,8 @@ def _candidate_signal_score(
     # Boost files that are known import targets from already-explored files.
     # These are high-value: exploring them reveals their own imports and
     # completes the dependency graph rather than hitting dead-end files.
-    known_targets = _resolved_import_targets(state)
+    if known_targets is None:
+        known_targets = _resolved_import_targets(state)
     if file_path in known_targets:
         score += 5
         reasons.append("known import target from explored files")
