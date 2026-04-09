@@ -4,3 +4,4 @@ pydantic[dotenv]
 gitpython
 python-dotenv
 pytest
+ollama
