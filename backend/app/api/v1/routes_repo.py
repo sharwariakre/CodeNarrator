@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 import re
 
@@ -20,8 +21,9 @@ from app.models import (
 from app.services.git_service import clone_or_update_repo, GitCloneError
 from app.services.analysis_snapshot_service import (
     build_analysis_snapshot,
-    run_analysis_loop,
+    run_analysis_loop,  # kept but not called — heuristic fallback
 )
+from app.services.agentic_analysis_service import run_agentic_analysis_loop
 from app.services.ai_interpreter import interpret_architecture
 from app.services.report_generator import generate_html_report
 from app.services.analysis_state_store import save_state, load_state
@@ -93,9 +95,9 @@ async def run_repo_snapshot_loop(payload: AnalysisLoopRequest):
             detail=f"Repository path not found: {requested_path}",
         )
 
-    loop_result = run_analysis_loop(
-        initial_state=payload.analysis_state.model_dump(),
-        max_steps=payload.max_steps,
+    initial_state = payload.analysis_state.model_dump()
+    loop_result = await asyncio.to_thread(
+        run_agentic_analysis_loop, initial_state, payload.max_steps
     )
     final_state = loop_result["final_state"]
     save_state(
