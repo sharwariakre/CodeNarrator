@@ -4,6 +4,8 @@ from pathlib import Path
 class Settings(BaseSettings):
     # Base directory for cloned repositories
     REPO_BASE_DIR: Path = Path("./data/repos")
+    # Directory for persisted analysis state cache
+    ANALYSIS_CACHE_DIR: Path = Path("./data/analysis_cache")
 
     class Config:
         env_file = ".env"

@@ -74,7 +74,18 @@ class RepoAnalysisSnapshotResponse(BaseModel):
 
 class AnalysisLoopRequest(BaseModel):
     analysis_state: AnalysisState
-    max_steps: int = 5
+    max_steps: int = 15
+
+
+class CachedStateRequest(BaseModel):
+    repo_id: str
+    local_path: str
+
+
+class CachedStateResponse(BaseModel):
+    repo_id: str
+    found: bool
+    final_state: AnalysisState | None = None
 
 
 class AnalysisStepTrace(BaseModel):

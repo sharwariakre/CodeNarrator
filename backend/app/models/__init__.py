@@ -3,6 +3,8 @@ from .repo_models import (
     AnalysisLoopResponse,
     AnalysisState,
     AnalysisStepTrace,
+    CachedStateRequest,
+    CachedStateResponse,
     DependencyEdge,
     GenerateReportRequest,
     GenerateReportResponse,
