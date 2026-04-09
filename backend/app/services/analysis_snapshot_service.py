@@ -1,4 +1,5 @@
 import ast
+import posixpath
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -87,6 +88,9 @@ def advance_analysis_state(current_state: Dict) -> Dict:
         next_state["stop_reason"] = "No remaining candidate files to inspect."
         return next_state
 
+    # Check before exploring so the pre-exploration dep_edges are used.
+    candidate_is_import_target = candidate_file in _resolved_import_targets(next_state)
+
     inspected = _inspect_file(next_state, candidate_file)
     if inspected is None:
         next_state["stop_reason"] = f"Candidate file is unavailable: {candidate_file}"
@@ -104,6 +108,7 @@ def advance_analysis_state(current_state: Dict) -> Dict:
     unknowns_before = list(next_state["unknowns"])
 
     fact_evidence = _record_inspected_fact(next_state, inspected)
+    fact_evidence["explored_import_target"] = candidate_is_import_target
     _record_dependency_edge(next_state, inspected)
     summary_evidence = _refine_summary(next_state, inspected)
     unknowns_cleared = _reduce_unknowns(next_state, inspected)
@@ -569,6 +574,8 @@ def _update_confidence(
         delta += min(0.09, 0.03 * unknowns_cleared)
     if summary_evidence["new_summary_fact"] or fact_evidence["materially_new_fact"]:
         delta += 0.04
+    if fact_evidence.get("explored_import_target"):
+        delta += 0.04
 
     state["confidence"] = round(max(0.0, min(confidence + delta, 0.95)), 2)
     return delta > 0
@@ -667,6 +674,19 @@ def _refresh_candidates_for_signal(state: Dict, limit: int) -> None:
     state["candidate_files"] = candidates
 
 
+def _resolved_import_targets(state: Dict) -> Set[str]:
+    """Return the set of internal file paths that explored files import."""
+    targets: Set[str] = set()
+    for edge in state.get("dependency_edges", []):
+        source = edge["source"]
+        source_dir = posixpath.dirname(source)
+        for imp in edge.get("imports", []):
+            if imp.startswith(("./", "../")):
+                resolved = posixpath.normpath(posixpath.join(source_dir, imp))
+                targets.add(resolved)
+    return targets
+
+
 def _candidate_signal_score(
     state: Dict,
     file_path: str,
@@ -723,6 +743,14 @@ def _candidate_signal_score(
 
     if top_level_dir in {"docs", "tests"}:
         score -= 2
+
+    # Boost files that are known import targets from already-explored files.
+    # These are high-value: exploring them reveals their own imports and
+    # completes the dependency graph rather than hitting dead-end files.
+    known_targets = _resolved_import_targets(state)
+    if file_path in known_targets:
+        score += 5
+        reasons.append("known import target from explored files")
 
     if role_hint == "test":
         score -= 2
