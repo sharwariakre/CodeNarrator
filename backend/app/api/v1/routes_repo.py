@@ -6,6 +6,8 @@ from app.core.config import settings
 from app.models import (
     AnalysisLoopRequest,
     AnalysisLoopResponse,
+    CachedStateRequest,
+    CachedStateResponse,
     GenerateReportRequest,
     GenerateReportResponse,
     IngestRepoRequest,
@@ -22,6 +24,7 @@ from app.services.analysis_snapshot_service import (
 )
 from app.services.ai_interpreter import interpret_architecture
 from app.services.report_generator import generate_html_report
+from app.services.analysis_state_store import save_state, load_state
 
 router = APIRouter(prefix="/repos", tags=["repos"])
 
@@ -94,7 +97,27 @@ async def run_repo_snapshot_loop(payload: AnalysisLoopRequest):
         initial_state=payload.analysis_state.model_dump(),
         max_steps=payload.max_steps,
     )
+    final_state = loop_result["final_state"]
+    save_state(
+        repo_id=final_state["repo_id"],
+        local_path=final_state["current_summary"]["local_path"],
+        final_state=final_state,
+        cache_dir=_resolve_cache_dir(),
+    )
     return AnalysisLoopResponse(**loop_result)
+
+
+@router.post("/state", response_model=CachedStateResponse)
+async def get_cached_state(payload: CachedStateRequest):
+    """Return persisted analysis state if it exists and matches current git HEAD."""
+    cached = load_state(
+        repo_id=payload.repo_id,
+        local_path=payload.local_path,
+        cache_dir=_resolve_cache_dir(),
+    )
+    if cached is None:
+        return CachedStateResponse(repo_id=payload.repo_id, found=False)
+    return CachedStateResponse(repo_id=payload.repo_id, found=True, final_state=cached)
 
 
 @router.post("/interpret", response_model=InterpretArchitectureResponse)
@@ -129,6 +152,13 @@ def _resolve_repo_base_dir() -> Path:
     if not repo_base_dir.is_absolute():
         return (Path.cwd() / repo_base_dir).resolve()
     return repo_base_dir.resolve()
+
+
+def _resolve_cache_dir() -> Path:
+    cache_dir = settings.ANALYSIS_CACHE_DIR
+    if not cache_dir.is_absolute():
+        return (Path.cwd() / cache_dir).resolve()
+    return cache_dir.resolve()
 
 
 def _resolve_reports_dir() -> Path:
