@@ -122,7 +122,7 @@ def advance_analysis_state(current_state: Dict) -> Dict:
 
     summary_changed = _summary_progress_signature(next_state["current_summary"]) != summary_before
     unknowns_changed = next_state["unknowns"] != unknowns_before
-    meaningful_progress = summary_changed or unknowns_changed or confidence_evidence
+    meaningful_progress = summary_changed or unknowns_changed or confidence_evidence or fact_evidence.get("explored_import_target", False)
 
     if meaningful_progress:
         next_state["no_progress_steps"] = 0
@@ -573,8 +573,6 @@ def _update_confidence(
     if unknowns_cleared > 0:
         delta += min(0.09, 0.03 * unknowns_cleared)
     if summary_evidence["new_summary_fact"] or fact_evidence["materially_new_fact"]:
-        delta += 0.04
-    if fact_evidence.get("explored_import_target"):
         delta += 0.04
 
     state["confidence"] = round(max(0.0, min(confidence + delta, 0.95)), 2)
