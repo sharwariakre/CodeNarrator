@@ -75,8 +75,6 @@ def _build_report_payload(final_state: Dict, interpretation: Dict | None) -> Dic
                 "in_degree": incoming_count.get(file_path, 0),
             }
         )
-    node_ids = {node["id"] for node in nodes}
-
     interpretation = interpretation or {}
     main_components = interpretation.get("main_components", [])
     key_dependencies = interpretation.get("key_dependencies", [])
