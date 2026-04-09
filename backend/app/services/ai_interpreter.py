@@ -23,7 +23,15 @@ def interpret_architecture(analysis_state: Dict) -> Optional[Dict]:
         payload = _build_interpretation_payload(analysis_state, graph_summary)
         prompt = _build_prompt(payload)
         response_text = _call_ollama(prompt)
-        return _parse_interpretation_json(response_text)
+        parsed = _parse_interpretation_json(response_text)
+        if parsed is not None:
+            explored_paths = {
+                fact["file_path"]
+                for fact in analysis_state.get("inspected_facts", [])
+                if fact.get("file_path")
+            }
+            parsed = _validate_interpretation(parsed, explored_paths)
+        return parsed
     except Exception as exc:  # pragma: no cover - fallback safety for optional layer
         LOGGER.warning("AI interpretation failed: %s", exc)
         return None
@@ -127,6 +135,27 @@ def _parse_interpretation_json(response_text: str) -> Optional[Dict]:
         return None
 
     return parsed
+
+
+def _validate_interpretation(interpretation: Dict, explored_paths: set) -> Dict:
+    """
+    Strip any file references from the AI output that don't exist in explored_paths.
+    Removes components whose file list becomes empty after filtering.
+    Removes dependency edges where either endpoint was not explored.
+    """
+    components = []
+    for component in interpretation.get("main_components", []):
+        valid_files = [f for f in component.get("files", []) if f in explored_paths]
+        if valid_files:
+            components.append({**component, "files": valid_files})
+    interpretation["main_components"] = components
+
+    interpretation["key_dependencies"] = [
+        dep for dep in interpretation.get("key_dependencies", [])
+        if dep.get("from") in explored_paths and dep.get("to") in explored_paths
+    ]
+
+    return interpretation
 
 
 def _load_json_loose(text: str) -> Optional[Dict]:
