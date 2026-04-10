@@ -1,8 +1,29 @@
 import json
+import logging
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Dict
 
 from app.services.analysis_snapshot_service import _compute_dependency_graph_summary
+
+LOGGER = logging.getLogger(__name__)
+_D3_CDN = "https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"
+_D3_CACHE: str | None = None
+
+
+def _get_d3_js() -> str:
+    """Fetch D3 once and cache it in memory. Falls back to CDN tag on failure."""
+    global _D3_CACHE
+    if _D3_CACHE is not None:
+        return _D3_CACHE
+    try:
+        with urllib.request.urlopen(_D3_CDN, timeout=15) as resp:
+            _D3_CACHE = resp.read().decode("utf-8")
+            return _D3_CACHE
+    except Exception as exc:
+        LOGGER.warning("Could not fetch D3 for embedding (%s), using CDN tag.", exc)
+        return ""
 
 
 def generate_html_report(final_state: Dict, interpretation: Dict | None, output_path: Path) -> Path:
@@ -108,6 +129,8 @@ def _build_report_payload(final_state: Dict, interpretation: Dict | None) -> Dic
 
 def _render_html(payload: Dict) -> str:
     data_json = json.dumps(payload).replace("</script>", "<\\/script>")
+    d3_js = _get_d3_js()
+    d3_tag = f"<script>{d3_js}</script>" if d3_js else f'<script src="{_D3_CDN}"></script>'
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -261,7 +284,7 @@ def _render_html(payload: Dict) -> str:
     </section>
   </div>
   <div class="tooltip" id="tooltip"></div>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+  {d3_tag}
   <script>
     window.REPORT_DATA = {data_json};
 

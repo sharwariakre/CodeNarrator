@@ -139,15 +139,16 @@ def _parse_interpretation_json(response_text: str) -> Optional[Dict]:
 
 def _validate_interpretation(interpretation: Dict, explored_paths: set) -> Dict:
     """
-    Strip any file references from the AI output that don't exist in explored_paths.
-    Removes components whose file list becomes empty after filtering.
-    Removes dependency edges where either endpoint was not explored.
+    Strip phantom file references from the AI output.
+    - Components: filter file list to explored files only, but keep the component
+      even if no files survive (name + description are still meaningful).
+    - Key dependencies: only keep edges where both endpoints were actually explored.
     """
     components = []
     for component in interpretation.get("main_components", []):
         valid_files = [f for f in component.get("files", []) if f in explored_paths]
-        if valid_files:
-            components.append({**component, "files": valid_files})
+        # Keep component regardless — just trim the file list.
+        components.append({**component, "files": valid_files})
     interpretation["main_components"] = components
 
     interpretation["key_dependencies"] = [

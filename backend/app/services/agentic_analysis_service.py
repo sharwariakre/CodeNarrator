@@ -273,6 +273,8 @@ def _build_system_message(state: Dict) -> Dict:
     explored_str = ", ".join(explored) if explored else "none yet"
     unknowns_str = "; ".join(unknowns) if unknowns else "none"
 
+    min_files = min(8, max(4, summary["file_count"] // 10))
+
     content = (
         f"You are analyzing the architecture of the repository '{summary['repo']}'.\n"
         f"Total source files: {summary['file_count']} | "
@@ -280,10 +282,16 @@ def _build_system_message(state: Dict) -> Dict:
         f"Already explored: {explored_str}\n"
         f"Open questions: {unknowns_str}\n\n"
         f"Suggested starting candidates:\n{candidate_lines}\n\n"
-        "Strategy: read entry-point files first, then follow their imports to trace "
-        "the dependency chain. Use search_for_pattern when you need to find where "
-        "something is defined. Record insights with mark_architecture_insight. "
-        "Call stop_analysis once you have a clear picture — do not explore every file."
+        f"RULES (follow strictly):\n"
+        f"1. You MUST call read_file or follow_import at least {min_files} times before "
+        f"calling stop_analysis. Do not stop early.\n"
+        f"2. After reading a file, always follow at least one of its imports with follow_import "
+        f"to trace the dependency chain.\n"
+        f"3. Cover different directories and roles — not just one cluster of files.\n"
+        f"4. Use mark_architecture_insight to record what you learn about entry points, "
+        f"components, and patterns.\n"
+        f"5. Only call stop_analysis after you have read at least {min_files} files AND "
+        f"have a clear picture of the overall architecture.\n"
     )
     return {"role": "system", "content": content}
 
