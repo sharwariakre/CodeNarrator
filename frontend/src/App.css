@@ -99,14 +99,6 @@ header h1 {
   opacity: 0.45;
 }
 
-.step-skipped {
-  opacity: 0.6;
-  border-color: var(--border);
-}
-
-.step-skipped .step-icon {
-  color: var(--text);
-}
 
 .step-running {
   border-color: var(--accent-border);

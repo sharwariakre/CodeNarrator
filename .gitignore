@@ -1,3 +1,4 @@
+.DS_Store
 /backend/venv/*
 # Python bytecode
 __pycache__/

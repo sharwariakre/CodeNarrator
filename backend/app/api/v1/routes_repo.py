@@ -97,7 +97,7 @@ async def run_repo_snapshot_loop(payload: AnalysisLoopRequest):
 
     initial_state = payload.analysis_state.model_dump()
     loop_result = await asyncio.to_thread(
-        run_analysis_loop, initial_state, payload.max_steps
+        run_agentic_analysis_loop, initial_state, payload.max_steps
     )
     final_state = loop_result["final_state"]
     save_state(
