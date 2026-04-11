@@ -2,23 +2,24 @@
 
 **An autonomous codebase understanding agent.**
 
-CodeNarrator ingests any Git repository and autonomously explores it — inspecting files, building a dependency graph, tracking its own understanding over time, and producing an AI-generated architectural summary. After giving it a repo URL, it decides which files to inspect, when it has learned enough to stop, and how to interpret what it found. No human guidance required between input and output.
+CodeNarrator ingests any Git repository and autonomously explores it — inspecting files, building a dependency graph, tracking its own understanding over time, and producing an AI-generated architectural summary. Paste a GitHub URL and get a full architecture report. No human guidance required between input and output.
 
-Built as a local-first FastAPI backend with a Qwen2.5-Coder 7B model running via Ollama.
+Built with a React + TypeScript frontend, a FastAPI backend, and a Qwen2.5-Coder 7B model running via Ollama.
 
 ---
 
 ## What It Does
 
 ```
-Git URL
+GitHub URL
   → Clone repo locally
   → Build initial understanding snapshot
-  → Run iterative exploration loop
+  → Run agentic exploration loop (Ollama tool-calling)
   → Extract imports and build dependency graph
   → Resolve internal file-to-file edges
   → Call local AI model for architectural interpretation
-  → Generate self-contained HTML report
+  → Generate self-contained HTML report with D3 graph
+  → Render report inline in the browser
 ```
 
 Given a repo like `https://github.com/user/project`, CodeNarrator produces:
@@ -31,44 +32,6 @@ Given a repo like `https://github.com/user/project`, CodeNarrator produces:
 
 ---
 
-## Demo Output
-
-**Dependency graph summary for a frontend/backend repo:**
-```json
-{
-  "internal_edges": [
-    {"from": "frontend/src/App.jsx", "to": "frontend/src/api/client.js"},
-    {"from": "server/server.js", "to": "server/routes/auth.js"},
-    {"from": "server/routes/auth.js", "to": "server/services/authService.js"}
-  ],
-  "clusters": [
-    {"cluster": "react", "files": ["frontend/src/App.jsx", "frontend/src/pages/CreateVault.jsx"]},
-    {"cluster": "express", "files": ["server/routes/auth.js", "server/server.js"]}
-  ]
-}
-```
-
-**AI interpretation:**
-```json
-{
-  "architecture_pattern": "Client-Server",
-  "main_components": [
-    {
-      "name": "Frontend",
-      "files": ["frontend/src/App.jsx", "frontend/src/pages/CreateVault.jsx"],
-      "description": "React application handling user interface and interactions"
-    },
-    {
-      "name": "Backend",
-      "files": ["server/server.js", "server/routes/auth.js", "server/services/authService.js"],
-      "description": "Express server managing authentication and business logic"
-    }
-  ],
-  "summary_for_new_developer": "This repository has a clear frontend/backend separation. The frontend is a React app that communicates with an Express backend through an API client. The backend manages authentication via a service layer and persists data through a Postgres connection."
-}
-```
-
----
 ## Example Report
 
 ![CodeNarrator dependency graph for Dead-Serious](docs/assets/dependency-mapping.png)
@@ -80,33 +43,45 @@ Given a repo like `https://github.com/user/project`, CodeNarrator produces:
 ### System Overview
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│                        FastAPI Backend                       │
-│                                                             │
-│  POST /repos/ingest                                         │
-│       ↓                                                     │
-│  GitPython clone → local disk                               │
-│                                                             │
-│  POST /repos/snapshot                                       │
-│       ↓                                                     │
-│  repo_scanner + repo_metadata → analysis_state (memory)    │
-│                                                             │
-│  POST /repos/snapshot/run                                   │
-│       ↓                                                     │
-│  Analysis Loop:                                             │
-│    score candidates → inspect file → update state          │
-│    → refresh candidates → check progress → repeat          │
-│       ↓                                                     │
-│  dependency_graph_summary (edges, clusters, rankings)      │
-│                                                             │
-│  POST /repos/interpret                                      │
-│       ↓                                                     │
-│  Ollama (Qwen2.5-Coder 7B) → structured interpretation     │
-│                                                             │
-│  POST /repos/report                                         │
-│       ↓                                                     │
-│  Self-contained HTML report with D3.js graph               │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────┐
+│                     React Frontend (Vite)                        │
+│                                                                  │
+│  URL input → sequential pipeline steps with live status         │
+│  → renders final HTML report inline in iframe                   │
+└───────────────────────────┬─────────────────────────────────────┘
+                            │ HTTP (Vite proxy → localhost:8000)
+┌───────────────────────────▼─────────────────────────────────────┐
+│                      FastAPI Backend                             │
+│                                                                  │
+│  POST /repos/ingest                                              │
+│       ↓                                                          │
+│  GitPython clone → local disk                                    │
+│                                                                  │
+│  POST /repos/snapshot                                            │
+│       ↓                                                          │
+│  repo_scanner + repo_metadata → initial analysis_state          │
+│                                                                  │
+│  POST /repos/snapshot/run                                        │
+│       ↓                                                          │
+│  Agentic Loop (Ollama tool-calling):                             │
+│    model picks tool → read_file / follow_import /               │
+│    search_for_pattern / mark_architecture_insight / stop        │
+│    → tool result fed back → model reasons → repeat              │
+│       ↓                                                          │
+│  dependency_graph_summary (edges, clusters, rankings)           │
+│                                                                  │
+│  POST /repos/interpret                                           │
+│       ↓                                                          │
+│  Ollama (Qwen2.5-Coder 7B) → structured interpretation          │
+│                                                                  │
+│  POST /repos/report                                              │
+│       ↓                                                          │
+│  Self-contained HTML report with D3.js graph (D3 embedded)      │
+│                                                                  │
+│  GET  /report-file                                               │
+│       ↓                                                          │
+│  Serves generated HTML to the frontend iframe                   │
+└─────────────────────────────────────────────────────────────────┘
 ```
 
 ### Core Components
@@ -122,48 +97,34 @@ The central memory object that flows through the entire system. Tracks everythin
   "inspected_facts": list[dict],      # what was learned from each file
   "dependency_edges": list[dict],     # raw import data per file
   "dependency_graph_summary": dict,   # resolved edges, clusters, rankings
+  "package_roots": list[str],         # detected Python package roots
   "unknowns": list[str],              # explicitly unresolved questions
   "current_summary": dict,            # evolving repo understanding
-  "confidence": float,                # evidence-based confidence 0.0-0.95
+  "confidence": float,                # evidence-based confidence 0.0–0.95
   "no_progress_steps": int,           # consecutive steps with no new signal
   "stop_reason": str | None           # why the loop stopped
 }
 ```
 
-#### The Analysis Loop
+#### The Agentic Loop
 
-The loop is the core agentic behavior. Each step:
+The loop is model-driven. An Ollama model receives the current analysis state and a running message history, then calls tools to decide what to explore next. Each step feeds tool results back into the history so the model reasons about what it has learned before deciding the next action.
 
-1. **Select** — score all unexplored files, pick highest signal candidate
-2. **Inspect** — read file, extract language, line count, role hint, imports
-3. **Record** — store inspected facts in state
-4. **Refine** — update summary if new entry points or directories discovered
-5. **Reduce** — clear unknowns that the inspected file resolves
-6. **Update confidence** — increase only when real evidence found
-7. **Refresh candidates** — re-rank all unexplored files based on new state
-8. **Check progress** — if 2 consecutive steps taught nothing, stop
+**Tools available to the model:**
 
-The loop stops when:
-- `no_progress_steps >= 2` → "No meaningful progress in 2 consecutive steps"
-- No candidates remain → "No more meaningful candidates available"
-- `max_steps` reached
+| Tool | Purpose |
+|------|---------|
+| `read_file` | Read a source file — returns language, role, imports, content preview |
+| `follow_import` | Resolve and read a file imported by an already-explored file |
+| `search_for_pattern` | Regex search across repo files |
+| `mark_architecture_insight` | Record a discovered architectural insight |
+| `stop_analysis` | Signal that exploration is complete |
 
-#### Candidate Scoring
-
-Every unexplored file is scored for information gain:
-
-| Signal | Score |
-|--------|-------|
-| Entry point filename match | +8 |
-| Can resolve entry point unknown | +5 |
-| New language not yet seen | +4 |
-| Central architecture file (server.js, main.py, etc.) | +4 |
-| New directory not yet explored | +3 |
-| New file role not yet seen | +2 |
-| New top-level domain signal | +2 |
-| Test or docs directory | −2 |
-
-The highest scoring unexplored file is always inspected next. This implements information gain based exploration — the agent always tries to learn the most from each step.
+**Loop controls (code-enforced, model cannot bypass):**
+- `stop_analysis` is rejected until a minimum number of files have been explored (scales with repo size: `min(15, max(6, file_count × 0.65))`)
+- After 2 consecutive steps with no new file explored, a nudge message lists unexplored files and forces the model to pick one
+- After 2 consecutive nudges with no response, the next unexplored file is force-read automatically
+- Ollama calls retry up to 2× on failure with backoff
 
 #### Evidence-Based Confidence
 
@@ -173,12 +134,10 @@ Confidence increases only when the loop actually discovers something new:
 |----------|-------|
 | New entry point discovered | +0.10 |
 | New top-level directory signal | +0.05 |
-| Unknown cleared | +0.03 per unknown |
+| Unknown cleared | +0.03 per unknown (max +0.09) |
 | Materially new inspected fact | +0.04 |
 
-Starting confidence is capped at 0.70 before any file inspection. A well-structured repo starts around 0.68. A weak/ambiguous repo starts around 0.34. This ensures the loop has meaningful room to demonstrate learning.
-
-Confidence is capped at 0.95 — never 1.0 — because complete understanding from static analysis alone is not achievable.
+Capped at 0.95 — never 1.0 — because complete understanding from static analysis alone is not achievable.
 
 #### Dependency Mapping
 
@@ -187,15 +146,17 @@ During each file inspection, imports are extracted and stored:
 **Python** — AST parser first, regex fallback:
 - `import X` and `from X import Y` forms
 - Relative imports: `from . import X`, `from ..utils import Y`
+- Absolute imports resolved to internal files using detected package roots
 
 **JavaScript/JSX** — regex based:
 - ES modules: `import X from 'Y'`
 - CommonJS: `require('Y')`
 
-**Internal edge resolution** — relative imports are resolved to actual repo files:
+**Internal edge resolution** — relative and absolute imports are resolved to actual repo files:
 - `./pages/CreateVault` → tries `.js`, `.jsx`, `.ts`, `.tsx`, `/index.js` variants
+- `from app.services.foo import X` → resolved against detected package roots
 - Edge only created if target file exists in the scanned repo
-- External libraries (`react`, `express`, `numpy`) remain unresolved as external dependencies
+- External libraries remain unresolved as external dependencies
 
 #### AI Interpretation
 
@@ -211,37 +172,48 @@ After the loop completes, the final state is passed to a local Ollama model:
 ```json
 {
   "architecture_pattern": "...",
-  "main_components": [{"name", "files", "description"}],
-  "key_dependencies": [{"from", "to", "reason"}],
+  "main_components": [{"name": "...", "files": [...], "description": "..."}],
+  "key_dependencies": [{"from": "...", "to": "...", "reason": "..."}],
   "summary_for_new_developer": "..."
 }
 ```
 
-The AI layer is **optional and non-blocking**. If Ollama is unreachable, times out, or returns malformed JSON, the system returns `null` for interpretation and continues. The deterministic analysis is always available.
+File references in the AI output are validated against actually-explored files — phantom file mentions are stripped before the report is generated.
+
+The AI layer is **optional and non-blocking**. If Ollama is unreachable or returns malformed JSON, interpretation returns `null` and the report is still generated with the deterministic analysis.
+
+#### HTML Report
+
+The report is a fully self-contained HTML file:
+- D3.js is fetched once and **embedded inline** at generation time (no CDN dependency, works offline)
+- Dependency graph with force-directed layout, color-coded clusters, hover tooltips
+- Node size = incoming internal dependencies
+- Grey dashed nodes = files imported but not explored
+- AI component list, key dependencies, explored files table
 
 ---
 
 ## Key Design Decisions
 
-**Why deterministic first, AI second**
+**Why agentic exploration**
 
-Deterministic logic is testable, debuggable, and explainable. If AI controlled the exploration loop, you would lose visibility into why decisions were made and have no reliable fallback when the model fails. The deterministic layer provides a stable foundation that AI enhances rather than replaces.
+A model-driven loop can adapt to what it finds — if one file reveals something unexpected, the model can follow that thread. A hardcoded scoring heuristic always applies the same logic regardless of what it has discovered. The agentic approach lets the model reason about its own understanding and prioritize accordingly.
+
+**Why code-enforced stop controls**
+
+Leaving the stop decision entirely to the model results in premature termination — the model calls `stop_analysis` after 2-3 files because it believes it has enough context. Code-level guards that reject early stops and force-read unexplored files ensure meaningful coverage regardless of model behavior. The model still drives exploration; it just cannot quit early.
 
 **Why evidence-based confidence instead of step-based**
 
-Step-based confidence is meaningless — you could reach high confidence by inspecting ten identical files. Evidence-based confidence means the score reflects actual understanding gained. If the loop explores 5 files and all are in the same directory with the same role, confidence stays low because nothing new was learned.
+Step-based confidence is meaningless — you could reach high confidence by inspecting ten identical files. Evidence-based confidence means the score reflects actual understanding gained.
 
 **Why separate snapshot from loop execution**
 
-Snapshot is one-time static observation. The loop is iterative reasoning. Mixing them would mean you cannot restart the loop from the same starting point, cannot compare different loop strategies, and cannot evaluate loop quality independently. The snapshot gives you a clean, reproducible starting state.
-
-**Why no-progress detection matters**
-
-Without it, the loop would always run to `max_steps` regardless of whether it was learning anything. The no-progress rule makes the agent self-aware about when exploration has become redundant — a fundamental property of well-designed autonomous systems.
+Snapshot is one-time static observation. The loop is iterative reasoning. Keeping them separate means you can restart the loop from the same starting point, compare different loop strategies, and evaluate loop quality independently.
 
 **Why local-first**
 
-No cloud costs, no latency, no data privacy concerns. A developer can run CodeNarrator against a private proprietary codebase without any data leaving their machine. Ollama runs the model locally with no external API calls.
+No cloud costs, no latency, no data privacy concerns. A developer can run CodeNarrator against a private proprietary codebase without any data leaving their machine.
 
 **Why internal edge resolution matters**
 
@@ -253,14 +225,15 @@ Raw relative imports (`./pages/CreateVault`) stored as strings tell you nothing 
 
 | Layer | Technology | Why |
 |-------|-----------|-----|
+| Frontend | React + TypeScript + Vite | Fast dev server, type-safe pipeline orchestration, iframe report rendering |
 | API framework | FastAPI | Native Pydantic integration, async support, automatic OpenAPI docs |
 | Data validation | Pydantic v2 | Request/response validation at API boundary, clean model definitions |
 | Repo cloning | GitPython | Programmatic Git operations, local-first cloning |
 | Python AST parsing | `ast` (stdlib) | Zero-dependency, reliable import extraction for Python files |
 | JS import extraction | Regex | No Node.js dependency needed for pattern-based extraction |
 | AI model | Qwen2.5-Coder 7B | Code-aware, runs locally on 16GB RAM MacBook, strong structured output |
-| Model serving | Ollama | Local model inference, simple REST API, no API billing |
-| Visualization | D3.js (CDN) | Force-directed graph, well-documented, no build step required |
+| Model serving | Ollama | Local model inference, simple API, no billing |
+| Visualization | D3.js (embedded) | Force-directed graph, embedded inline so report works offline |
 | Report format | Self-contained HTML | Opens in any browser, no server needed, shareable as a single file |
 
 ---
@@ -296,21 +269,22 @@ Build initial analysis state from an ingested repo.
 ```
 
 ### `POST /api/v1/repos/snapshot/run`
-Run the analysis loop from an initial state.
+Run the agentic analysis loop from an initial state.
 
 ```json
 // Request
-{"analysis_state": {...}, "max_steps": 10}
+{"analysis_state": {...}, "max_steps": 20}
 
 // Response
 {
-  "steps_executed": 7,
+  "steps_executed": 12,
   "explored_files_in_order": [...],
   "step_trace": [...],
   "final_summary": {...},
-  "final_confidence": 0.89,
+  "final_confidence": 0.80,
   "remaining_unknowns": [],
-  "stop_reason": "No meaningful progress in 2 consecutive steps.",
+  "stop_reason": "Agent decided analysis is complete.",
+  "dependency_graph_summary": {...},
   "final_state": {...}
 }
 ```
@@ -348,12 +322,27 @@ Generate a self-contained HTML report.
 {"report_path": "/absolute/path/to/data/reports/my-repo-report.html"}
 ```
 
+### `POST /api/v1/repos/state`
+Look up a cached analysis result for a repo (matched by repo ID and git HEAD commit).
+
+```json
+// Request
+{"repo_id": "github.com__user__repo", "local_path": "data/repos/..."}
+
+// Response
+{"repo_id": "...", "found": true, "final_state": {...}}
+```
+
+### `GET /report-file?path=...`
+Serve a generated HTML report file by absolute path. Only serves files inside the `data/reports/` directory.
+
 ---
 
 ## Setup
 
 ### Prerequisites
 - Python 3.11+
+- Node.js 18+
 - Git
 - [Ollama](https://ollama.com) installed
 
@@ -362,33 +351,43 @@ Generate a self-contained HTML report.
 ```bash
 # Clone the repo
 git clone https://github.com/sharwariakre/CodeNarrator
-cd CodeNarrator/backend
+cd CodeNarrator
 
-# Create virtual environment
+# Backend
+cd backend
 python3 -m venv venv
 source venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
 
 # Pull the AI model
 ollama pull qwen2.5-coder:7b
+
+# Frontend
+cd ../frontend
+npm install
 ```
 
 ### Running
 
 ```bash
-# Start Ollama (if not already running)
+# Terminal 1 — start Ollama (if not already running)
 ollama serve
 
-# Start the backend
+# Terminal 2 — start the backend
 cd backend
+source venv/bin/activate
 uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
+
+# Terminal 3 — start the frontend
+cd frontend
+npm run dev
 ```
 
-API docs available at `http://127.0.0.1:8000/docs`
+Open `http://localhost:5173`, paste a GitHub URL, and click Analyze.
 
-### End-to-End Example
+Backend API docs available at `http://127.0.0.1:8000/docs`
+
+### Running via API directly
 
 ```bash
 # 1. Ingest a repo
@@ -401,8 +400,8 @@ curl -s -X POST http://127.0.0.1:8000/api/v1/repos/snapshot \
   -H "Content-Type: application/json" \
   -d '{"local_path": "data/repos/github.com__user__repo"}' > snapshot.json
 
-# 3. Run analysis loop
-jq '{analysis_state: .analysis_state, max_steps: 10}' snapshot.json | \
+# 3. Run agentic analysis loop
+jq '{analysis_state: .analysis_state, max_steps: 20}' snapshot.json | \
   curl -s -X POST http://127.0.0.1:8000/api/v1/repos/snapshot/run \
   -H "Content-Type: application/json" -d @- > loop.json
 
@@ -427,27 +426,36 @@ open backend/data/reports/my-report.html
 
 ```
 CodeNarrator/
+├── frontend/                         # React + TypeScript UI
+│   ├── src/
+│   │   ├── App.tsx                   # Pipeline orchestration + step UI
+│   │   ├── api.ts                    # Typed fetch wrappers for all endpoints
+│   │   └── App.css                   # Styles
+│   └── vite.config.ts                # Dev proxy → backend
 └── backend/
     ├── app/
     │   ├── api/
     │   │   └── v1/
-    │   │       └── routes_repo.py        # All API endpoints
+    │   │       ├── routes_repo.py    # All repo analysis endpoints
+    │   │       └── routes_health.py  # Health check
     │   ├── core/
-    │   │   ├── config.py                 # Settings (repo base dir, etc.)
-    │   │   └── language_registry.py      # Extension → language mapping
+    │   │   └── config.py             # Settings (repo base dir, cache dir, etc.)
     │   ├── models/
-    │   │   └── repo_models.py            # Pydantic request/response models
+    │   │   └── repo_models.py        # Pydantic request/response models
     │   ├── services/
-    │   │   ├── git_service.py            # Repo cloning via GitPython
-    │   │   ├── repo_scanner.py           # File tree walking and language detection
-    │   │   ├── repo_metadata.py          # Entry points, repo type, top-level dirs
-    │   │   ├── analysis_snapshot_service.py  # Core agent loop and state management
-    │   │   ├── ai_interpreter.py         # Ollama API integration
-    │   │   └── report_generator.py       # HTML report generation
-    │   └── main.py                       # FastAPI app initialization
+    │   │   ├── git_service.py                # Repo cloning via GitPython
+    │   │   ├── repo_scanner.py               # File tree walking, language detection
+    │   │   ├── repo_metadata.py              # Entry points, repo type, top-level dirs
+    │   │   ├── analysis_snapshot_service.py  # Snapshot builder, heuristic scoring
+    │   │   ├── agentic_analysis_service.py   # Agentic loop with Ollama tool-calling
+    │   │   ├── analysis_state_store.py       # State persistence with git-HEAD staleness check
+    │   │   ├── ai_interpreter.py             # Ollama interpretation + output validation
+    │   │   └── report_generator.py           # HTML report generation (D3 embedded)
+    │   └── main.py                   # FastAPI app, CORS, /report-file endpoint
     └── data/
-        ├── repos/                        # Cloned repositories
-        └── reports/                      # Generated HTML reports
+        ├── repos/                    # Cloned repositories
+        ├── analysis_cache/           # Persisted analysis state (JSON, keyed by repo + git HEAD)
+        └── reports/                  # Generated HTML reports
 ```
 
 ---
@@ -470,21 +478,20 @@ CodeNarrator/
 
 ## Known Limitations
 
-- **Internal edge resolution** covers relative imports only. Absolute imports like `from app.services import X` are not yet resolved to file paths.
+- **Model quality cap** — Qwen2.5-Coder 7B running locally on CPU is slow (20-40s per tool call). The agentic loop takes 5-15 minutes on a fresh repo. Faster hardware or a larger/cloud model would significantly improve throughput.
 - **Cluster detection** groups by import prefix heuristics. Repos using path aliases (e.g. `@components/Button`) will produce less meaningful clusters.
-- **AI interpretation** runs once after the loop. The AI does not influence exploration decisions — a future improvement would allow AI to reprioritize candidates mid-loop.
-- **Report size** scales with repo size. For repos with 500+ files the embedded JSON in the HTML report may become large and the D3 graph may become slow.
 - **JavaScript AST** is not used — imports are extracted via regex. Dynamic imports and complex re-export patterns are not captured.
-- **No persistent sessions** — every analysis run starts fresh. Resuming a previous analysis is not yet supported.
+- **Report size** scales with repo size. For repos with 500+ files the embedded JSON in the HTML report may become large and the D3 graph may become slow.
+- **Single run, no streaming** — the frontend blocks on the loop call for the full duration. No incremental progress is shown during the loop (only elapsed time).
 
 ---
 
 ## What's Next
 
+- **Streaming progress** — stream step-by-step loop progress to the frontend via SSE so each file explored appears in real time
+- **Minified file filtering** — skip `*.min.js` / `*.min.css` from the candidate list; they never add architectural signal
 - **Richer structural facts** — function/class counts, detected patterns (DB access, API routes, config) to give AI more meaningful context
 - **VS Code extension** — show the dependency graph and architectural summary inline while navigating a repo
-- **AI-guided exploration** — allow the AI model to reprioritize candidates mid-loop based on what has been learned so far
-- **Session persistence** — save and resume analysis state across runs, detect repo changes since last analysis
 - **Multi-language AST** — proper AST parsing for JavaScript/TypeScript to handle barrel files and complex re-exports
 
 ---
@@ -497,4 +504,4 @@ The architecture deliberately separates deterministic reasoning (what files exis
 
 ---
 
-*Built with FastAPI, Pydantic, GitPython, D3.js, and Qwen2.5-Coder via Ollama.*
+*Built with React, TypeScript, Vite, FastAPI, Pydantic, GitPython, D3.js, and Qwen2.5-Coder via Ollama.*
