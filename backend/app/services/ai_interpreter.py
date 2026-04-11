@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+import time
 import urllib.error
 import urllib.request
 from typing import Dict, Optional
@@ -88,6 +89,9 @@ def _build_prompt(payload: Dict) -> str:
     )
 
 
+_RETRY_DELAYS = [1, 2]  # seconds between attempts; total = 3 tries
+
+
 def _call_ollama(prompt: str) -> str:
     request_body = {
         "model": OLLAMA_MODEL,
@@ -98,21 +102,28 @@ def _call_ollama(prompt: str) -> str:
         },
     }
 
-    request = urllib.request.Request(
-        OLLAMA_URL,
-        data=json.dumps(request_body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    last_exc: Exception = RuntimeError("No attempts made")
+    for attempt, _ in enumerate(["first"] + _RETRY_DELAYS):
+        if attempt > 0:
+            delay = _RETRY_DELAYS[attempt - 1]
+            LOGGER.warning("Ollama call failed (attempt %d), retrying in %ds…", attempt, delay)
+            time.sleep(delay)
 
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            raw = response.read().decode("utf-8")
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Ollama request failed: {exc}") from exc
+        request = urllib.request.Request(
+            OLLAMA_URL,
+            data=json.dumps(request_body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response:
+                raw = response.read().decode("utf-8")
+            payload = json.loads(raw)
+            return payload.get("response", "")
+        except urllib.error.URLError as exc:
+            last_exc = exc
 
-    payload = json.loads(raw)
-    return payload.get("response", "")
+    raise RuntimeError(f"Ollama request failed after {len(_RETRY_DELAYS) + 1} attempts: {last_exc}") from last_exc
 
 
 def _parse_interpretation_json(response_text: str) -> Optional[Dict]:
