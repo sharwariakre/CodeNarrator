@@ -188,12 +188,34 @@ def run_agentic_analysis_loop(initial_state: Dict, max_steps: int = 15) -> Dict:
 
     messages: List = [_build_system_message(state)]
     step_trace: List[Dict] = []
+    consecutive_no_file_steps = 0
 
     for step in range(1, steps_limit + 1):
         if state.get("stop_reason"):
             break
 
         previous_explored = list(state["explored_files"])
+
+        # After 2 consecutive steps with no file explored, force-read the next
+        # unexplored candidate so the model can reason about it.
+        if consecutive_no_file_steps >= 2:
+            forced = _next_unexplored(state)
+            if forced:
+                LOGGER.info("Step %d: force-reading '%s' after %d silent steps.", step, forced, consecutive_no_file_steps)
+                result, _ = _tool_read_file(state, forced)
+                messages.append({
+                    "role": "user",
+                    "content": f"[Auto-read] {result}\n\nContinue exploring the remaining files.",
+                })
+                new_file = _newly_explored_file(previous_explored, state["explored_files"])
+                step_trace.append(_trace_entry(step, new_file, state))
+                consecutive_no_file_steps = 0
+                continue
+            else:
+                # No unexplored files left — allow stop.
+                LOGGER.info("Step %d: all files explored, stopping.", step)
+                state["stop_reason"] = "All candidate files have been explored."
+                break
 
         response = _call_model_with_retry(messages, retries=2)
         if response is None:
@@ -207,12 +229,15 @@ def run_agentic_analysis_loop(initial_state: Dict, max_steps: int = 15) -> Dict:
 
         tool_calls = _extract_tool_calls(response)
         if not tool_calls:
-            LOGGER.info("Step %d: model returned no tool call, skipping.", step)
+            LOGGER.info("Step %d: model returned no tool call — injecting nudge.", step)
+            messages.append(_nudge_message(state))
             step_trace.append(_trace_entry(step, None, state))
+            consecutive_no_file_steps += 1
             continue
 
         explored_this_step: Optional[str] = None
         stop_this_step = False
+        file_explored_this_step = False
 
         for tc in tool_calls:
             result, side_effect = _dispatch_tool(
@@ -228,9 +253,17 @@ def run_agentic_analysis_loop(initial_state: Dict, max_steps: int = 15) -> Dict:
                 new_file = _newly_explored_file(previous_explored, state["explored_files"])
                 if new_file:
                     explored_this_step = new_file
+                    file_explored_this_step = True
                     previous_explored = list(state["explored_files"])
             elif side_effect == "stop":
                 stop_this_step = True
+
+        if file_explored_this_step:
+            consecutive_no_file_steps = 0
+        elif not stop_this_step:
+            # Tool calls made but no new file explored — nudge and count.
+            messages.append(_nudge_message(state))
+            consecutive_no_file_steps += 1
 
         step_trace.append(_trace_entry(step, explored_this_step, state))
 
@@ -273,7 +306,7 @@ def _build_system_message(state: Dict) -> Dict:
     explored_str = ", ".join(explored) if explored else "none yet"
     unknowns_str = "; ".join(unknowns) if unknowns else "none"
 
-    min_files = min(8, max(4, summary["file_count"] // 10))
+    min_files = min(15, max(6, int(summary["file_count"] * 0.65)))
 
     content = (
         f"You are analyzing the architecture of the repository '{summary['repo']}'.\n"
@@ -465,7 +498,21 @@ def _tool_mark_insight(
     return f"Insight recorded: [{insight_type}] {description}", None
 
 
-def _tool_stop(state: Dict, reason: str) -> Tuple[str, str]:
+def _tool_stop(state: Dict, reason: str) -> Tuple[str, Optional[str]]:
+    file_count = state.get("current_summary", {}).get("file_count", 0)
+    # For small repos explore most of them; scale down for large repos.
+    # e.g. 16 files → 10, 30 files → 12, 80 files → 14, 200 files → 15
+    min_files = min(15, max(6, int(file_count * 0.65)))
+    explored = len(state.get("explored_files", []))
+
+    if explored < min_files:
+        return (
+            f"STOP REJECTED: You have only explored {explored} file(s). "
+            f"You must explore at least {min_files} files before stopping. "
+            f"Continue with read_file or follow_import.",
+            None,  # no "stop" side effect — loop continues
+        )
+
     state["stop_reason"] = reason or "Agent decided analysis is complete."
     return f"Analysis stopped: {state['stop_reason']}", "stop"
 
@@ -566,6 +613,67 @@ def _file_preview(path: Path) -> str:
         return "\n".join(preview) + tail
     except OSError:
         return "(could not read file)"
+
+
+def _next_unexplored(state: Dict) -> Optional[str]:
+    """
+    Return the next unexplored file, or None if all files have been explored.
+    Checks candidate_files first (scored/prioritised), then falls back to
+    scanning ALL repo files so nothing is missed.
+    """
+    explored = set(state.get("explored_files", []))
+
+    # 1. Prioritised candidates first.
+    for c in state.get("candidate_files", []):
+        if c["file_path"] not in explored:
+            return c["file_path"]
+
+    # 2. Fall back to every file in the repo.
+    repo_path = Path(state["current_summary"]["local_path"]).resolve()
+    try:
+        all_files = scan_repository(repo_path)["files"]
+    except Exception:
+        return None
+    for f in all_files:
+        if f not in explored:
+            return f
+    return None
+
+
+def _nudge_message(state: Dict) -> Dict:
+    """
+    Injected as a user turn when the model goes silent or makes no file-exploring call.
+    Lists unexplored files explicitly so the model has a clear next action.
+    """
+    explored = set(state.get("explored_files", []))
+    candidates = [
+        c["file_path"] for c in state.get("candidate_files", [])
+        if c["file_path"] not in explored
+    ]
+    # Also surface any files reachable via imports that haven't been read yet.
+    import_targets = [
+        t for t in _resolved_import_targets(state)
+        if t not in explored
+    ]
+    unexplored = candidates + [t for t in import_targets if t not in candidates]
+
+    if unexplored:
+        file_list = "\n".join(f"  - {f}" for f in unexplored[:8])
+        return {
+            "role": "user",
+            "content": (
+                f"You have not yet read these files. Pick the most architecturally "
+                f"significant one and call read_file on it:\n{file_list}"
+            ),
+        }
+    # All known candidates exhausted — tell the model it can stop.
+    return {
+        "role": "user",
+        "content": (
+            "You have explored all known candidate files. "
+            "Call stop_analysis with a summary of what you found."
+        ),
+    }
 
 
 def _trace_entry(

@@ -2,7 +2,6 @@ import { useState, useEffect, useRef } from "react";
 import {
   ingestRepo,
   getSnapshot,
-  getCachedState,
   runLoop,
   interpretArchitecture,
   generateReport,
@@ -11,7 +10,7 @@ import {
 import type { AnalysisState } from "./api";
 import "./App.css";
 
-type StepStatus = "idle" | "running" | "done" | "skipped" | "error";
+type StepStatus = "idle" | "running" | "done" | "error";
 
 interface Step {
   id: string;
@@ -22,12 +21,11 @@ interface Step {
 
 function makeSteps(): Step[] {
   return [
-    { id: "ingest",    label: "Clone / update repository",    status: "idle" },
-    { id: "snapshot",  label: "Build initial snapshot",        status: "idle" },
-    { id: "cache",     label: "Check analysis cache",          status: "idle" },
-    { id: "loop",      label: "Run analysis loop",             status: "idle" },
+    { id: "ingest",    label: "Clone / update repository",     status: "idle" },
+    { id: "snapshot",  label: "Build initial snapshot",         status: "idle" },
+    { id: "loop",      label: "Run analysis loop",              status: "idle" },
     { id: "interpret", label: "AI architecture interpretation", status: "idle" },
-    { id: "report",    label: "Generate HTML report",          status: "idle" },
+    { id: "report",    label: "Generate HTML report",           status: "idle" },
   ];
 }
 
@@ -35,7 +33,6 @@ const ICONS: Record<StepStatus, string> = {
   idle:    "○",
   running: "◌",
   done:    "✓",
-  skipped: "⤼",
   error:   "✗",
 };
 
@@ -91,34 +88,16 @@ export default function App() {
         detail: `${snapshot.repo_summary.file_count} files · ${snapshot.repo_summary.languages.join(", ")}`,
       });
 
-      // 3. Cache check
-      updateStep("cache", { status: "running" });
-      const cached = await getCachedState(snapshot.analysis_state.repo_id, localPath);
-
-      let finalState: AnalysisState;
-
-      if (cached.found && cached.final_state) {
-        const s = cached.final_state;
-        updateStep("cache", {
-          status: "done",
-          detail: `Cache hit · ${s.explored_files.length} files · confidence ${(s.confidence * 100).toFixed(0)}%`,
-        });
-        updateStep("loop", { status: "skipped", detail: "Using cached analysis" });
-        finalState = s;
-      } else {
-        updateStep("cache", { status: "done", detail: "No cache — running fresh analysis" });
-
-        // 4. Analysis loop
-        updateStep("loop", { status: "running" });
-        setLoopRunning(true);
-        const loopResult = await runLoop(snapshot.analysis_state, 15);
-        setLoopRunning(false);
-        updateStep("loop", {
-          status: "done",
-          detail: `${loopResult.steps_executed} steps · ${loopResult.explored_files_in_order.length} files · confidence ${(loopResult.final_confidence * 100).toFixed(0)}%`,
-        });
-        finalState = loopResult.final_state;
-      }
+      // 3. Analysis loop
+      updateStep("loop", { status: "running" });
+      setLoopRunning(true);
+      const loopResult = await runLoop(snapshot.analysis_state, 20);
+      setLoopRunning(false);
+      const finalState: AnalysisState = loopResult.final_state;
+      updateStep("loop", {
+        status: "done",
+        detail: `${loopResult.steps_executed} steps · ${loopResult.explored_files_in_order.length} files · confidence ${(loopResult.final_confidence * 100).toFixed(0)}%`,
+      });
 
       // 5. Interpret
       updateStep("interpret", { status: "running" });
