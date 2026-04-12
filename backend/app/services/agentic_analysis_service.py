@@ -302,6 +302,7 @@ def _build_system_message(state: Dict) -> Dict:
     candidate_lines = "\n".join(
         f"  - {c['file_path']}  ({c.get('reason', '')})"
         for c in candidates[:15]
+        if not _is_noise_file(c["file_path"])
     )
     explored_str = ", ".join(explored) if explored else "none yet"
     unknowns_str = "; ".join(unknowns) if unknowns else "none"
@@ -601,6 +602,22 @@ def _call_model_with_retry(messages: List, retries: int = 2):
 # Helpers
 # ---------------------------------------------------------------------------
 
+_NOISE_SUFFIXES = {".min.js", ".min.css", ".min.mjs", ".bundle.js", ".chunk.js"}
+_NOISE_PATH_SEGMENTS = {"node_modules", "vendor", "vendors", "dist", "build", ".git"}
+
+
+def _is_noise_file(file_path: str) -> bool:
+    """Return True for minified, vendored, or build-artifact files that carry no architecture signal."""
+    p = Path(file_path)
+    # Check suffix combinations (e.g. foo.min.js has suffix .js but name ends with .min)
+    name = p.name.lower()
+    if any(name.endswith(suf) for suf in _NOISE_SUFFIXES):
+        return True
+    # Check if any path segment is a known vendor/build directory
+    parts = {part.lower() for part in p.parts}
+    return bool(parts & _NOISE_PATH_SEGMENTS)
+
+
 def _file_preview(path: Path) -> str:
     try:
         lines = path.read_text(encoding="utf-8", errors="ignore").splitlines()
@@ -623,19 +640,20 @@ def _next_unexplored(state: Dict) -> Optional[str]:
     """
     explored = set(state.get("explored_files", []))
 
-    # 1. Prioritised candidates first.
+    # 1. Prioritised candidates first (skip noise files).
     for c in state.get("candidate_files", []):
-        if c["file_path"] not in explored:
-            return c["file_path"]
+        fp = c["file_path"]
+        if fp not in explored and not _is_noise_file(fp):
+            return fp
 
-    # 2. Fall back to every file in the repo.
+    # 2. Fall back to every file in the repo (skip noise files).
     repo_path = Path(state["current_summary"]["local_path"]).resolve()
     try:
         all_files = scan_repository(repo_path)["files"]
     except Exception:
         return None
     for f in all_files:
-        if f not in explored:
+        if f not in explored and not _is_noise_file(f):
             return f
     return None
 
@@ -648,12 +666,12 @@ def _nudge_message(state: Dict) -> Dict:
     explored = set(state.get("explored_files", []))
     candidates = [
         c["file_path"] for c in state.get("candidate_files", [])
-        if c["file_path"] not in explored
+        if c["file_path"] not in explored and not _is_noise_file(c["file_path"])
     ]
     # Also surface any files reachable via imports that haven't been read yet.
     import_targets = [
         t for t in _resolved_import_targets(state)
-        if t not in explored
+        if t not in explored and not _is_noise_file(t)
     ]
     unexplored = candidates + [t for t in import_targets if t not in candidates]
 
