@@ -182,6 +182,14 @@ def run_agentic_analysis_loop(initial_state: Dict, max_steps: int = 15) -> Dict:
     state = _copy_state(initial_state)
     state.setdefault("dependency_graph_summary", {})
 
+    # Cache the full repo file list once so tool functions don't re-scan on every call.
+    repo_path = Path(state["current_summary"]["local_path"]).resolve()
+    try:
+        _cached_scan = scan_repository(repo_path)
+        state["_cached_files"] = _cached_scan["files"]
+    except Exception:
+        state["_cached_files"] = []
+
     # Kept separate — not part of AnalysisState model shape.
     architecture_insights: List[Dict] = []
     initial_explored_len = len(state.get("explored_files", []))
@@ -427,8 +435,7 @@ def _tool_follow_import(
         return "Error: from_file and import_path are both required.", None
 
     repo_path = Path(state["current_summary"]["local_path"]).resolve()
-    scan_result = scan_repository(repo_path)
-    scanned_files = set(scan_result["files"])
+    scanned_files = set(state.get("_cached_files", []))
     package_roots = [Path(r) for r in state.get("package_roots", [])]
 
     resolved = _resolve_internal_import(
@@ -462,7 +469,7 @@ def _tool_search_for_pattern(
         return f"Invalid regex: {exc}", None
 
     repo_path = Path(state["current_summary"]["local_path"]).resolve()
-    files = scan_repository(repo_path)["files"]
+    files = state.get("_cached_files", [])
     matches: List[str] = []
 
     for file_path in files:
@@ -647,12 +654,7 @@ def _next_unexplored(state: Dict) -> Optional[str]:
             return fp
 
     # 2. Fall back to every file in the repo (skip noise files).
-    repo_path = Path(state["current_summary"]["local_path"]).resolve()
-    try:
-        all_files = scan_repository(repo_path)["files"]
-    except Exception:
-        return None
-    for f in all_files:
+    for f in state.get("_cached_files", []):
         if f not in explored and not _is_noise_file(f):
             return f
     return None
