@@ -8,6 +8,8 @@ class Settings(BaseSettings):
     ANALYSIS_CACHE_DIR: Path = Path("./data/analysis_cache")
     # Ollama model used for both agentic loop and architecture interpretation
     OLLAMA_MODEL: str = "qwen2.5-coder:7b"
+    # Maximum allowed repo size in MB before clone is rejected (0 = no limit)
+    REPO_MAX_SIZE_MB: int = 500
 
     class Config:
         env_file = ".env"
