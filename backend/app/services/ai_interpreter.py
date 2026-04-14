@@ -7,11 +7,12 @@ import urllib.request
 from typing import Dict, Optional
 
 from app.services.analysis_snapshot_service import _compute_dependency_graph_summary
+from app.core.config import settings
 
 LOGGER = logging.getLogger(__name__)
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "qwen2.5-coder:7b"
+OLLAMA_MODEL = settings.OLLAMA_MODEL
 
 
 def interpret_architecture(analysis_state: Dict) -> Optional[Dict]:
@@ -116,7 +117,7 @@ def _call_ollama(prompt: str) -> str:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=120) as response:
+            with urllib.request.urlopen(request, timeout=60) as response:
                 raw = response.read().decode("utf-8")
             payload = json.loads(raw)
             return payload.get("response", "")

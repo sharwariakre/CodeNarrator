@@ -28,10 +28,11 @@ from app.services.analysis_snapshot_service import (
     _update_confidence,
 )
 from app.services.repo_scanner import scan_repository
+from app.core.config import settings
 
 LOGGER = logging.getLogger(__name__)
 
-OLLAMA_MODEL = "qwen2.5-coder:7b"
+OLLAMA_MODEL = settings.OLLAMA_MODEL
 MAX_SEARCH_RESULTS = 10
 MAX_FILE_PREVIEW_LINES = 40
 

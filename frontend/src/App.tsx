@@ -36,30 +36,23 @@ const ICONS: Record<StepStatus, string> = {
   error:   "✗",
 };
 
-function useElapsedSeconds(active: boolean) {
+function ElapsedTimer({ prefix }: { prefix: string }) {
   const [seconds, setSeconds] = useState(0);
   const ref = useRef<ReturnType<typeof setInterval> | null>(null);
   useEffect(() => {
-    if (active) {
-      setSeconds(0);
-      ref.current = setInterval(() => setSeconds((s) => s + 1), 1000);
-    } else {
-      if (ref.current) clearInterval(ref.current);
-    }
+    setSeconds(0);
+    ref.current = setInterval(() => setSeconds((s) => s + 1), 1000);
     return () => { if (ref.current) clearInterval(ref.current); };
-  }, [active]);
-  return seconds;
+  }, []);
+  return <span className="step-detail">{prefix}{seconds}s elapsed</span>;
 }
 
 export default function App() {
   const [url, setUrl]               = useState("");
   const [steps, setSteps]           = useState<Step[]>(makeSteps());
   const [running, setRunning]       = useState(false);
-  const [loopRunning, setLoopRunning] = useState(false);
   const [reportHtml, setReportHtml] = useState<string | null>(null);
   const [globalError, setGlobalError] = useState<string | null>(null);
-
-  const loopElapsed = useElapsedSeconds(loopRunning);
 
   function updateStep(id: string, patch: Partial<Step>) {
     setSteps((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
@@ -68,7 +61,6 @@ export default function App() {
   async function handleAnalyze() {
     if (!url.trim()) return;
     setRunning(true);
-    setLoopRunning(false);
     setReportHtml(null);
     setGlobalError(null);
     setSteps(makeSteps());
@@ -90,9 +82,7 @@ export default function App() {
 
       // 3. Analysis loop
       updateStep("loop", { status: "running" });
-      setLoopRunning(true);
       const loopResult = await runLoop(snapshot.analysis_state, 20);
-      setLoopRunning(false);
       const finalState: AnalysisState = loopResult.final_state;
       updateStep("loop", {
         status: "done",
@@ -126,7 +116,6 @@ export default function App() {
       const html = await fetchReportHtml(reportResp.report_path);
       setReportHtml(html);
     } catch (err: unknown) {
-      setLoopRunning(false);
       const msg = err instanceof Error ? err.message : String(err);
       setGlobalError(msg);
       setSteps((prev) =>
@@ -168,16 +157,15 @@ export default function App() {
       {anyStepStarted && (
         <div className="steps">
           {steps.map((step) => {
-            const isLoop = step.id === "loop";
-            const detail =
-              isLoop && step.status === "running"
-                ? `Running heuristic analysis… ${loopElapsed}s elapsed`
-                : step.detail;
+            const isLoopRunning = step.id === "loop" && step.status === "running";
             return (
               <div key={step.id} className={`step step-${step.status}`}>
                 <span className="step-icon">{ICONS[step.status]}</span>
                 <span className="step-label">{step.label}</span>
-                {detail && <span className="step-detail">{detail}</span>}
+                {isLoopRunning
+                  ? <ElapsedTimer prefix="Running… " />
+                  : step.detail && <span className="step-detail">{step.detail}</span>
+                }
               </div>
             );
           })}
