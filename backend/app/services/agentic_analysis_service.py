@@ -309,11 +309,40 @@ def run_agentic_analysis_loop(initial_state: Dict, max_steps: int = 15) -> Dict:
 # System prompt
 # ---------------------------------------------------------------------------
 
+def _build_dir_tree(files: List[str], max_depth: int = 2) -> str:
+    """
+    Build a compact directory tree string from a flat file list.
+    Shows unique directory paths up to max_depth levels deep.
+    Example output:
+      src/
+        components/
+        services/
+      tests/
+    """
+    dirs: set = set()
+    for f in files:
+        parts = Path(f).parts
+        for depth in range(1, min(len(parts), max_depth + 1)):
+            if depth < len(parts):  # only directories, not files
+                dirs.add(parts[:depth])
+
+    if not dirs:
+        return ""
+
+    sorted_dirs = sorted(dirs)
+    lines = []
+    for parts in sorted_dirs:
+        indent = "  " * (len(parts) - 1)
+        lines.append(f"{indent}{parts[-1]}/")
+    return "\n".join(lines)
+
+
 def _build_system_message(state: Dict) -> Dict:
     summary = state["current_summary"]
     explored = state["explored_files"]
     candidates = state.get("candidate_files", [])
     unknowns = state.get("unknowns", [])
+    cached_files = state.get("_cached_files", [])
 
     candidate_lines = "\n".join(
         f"  - {c['file_path']}  ({c.get('reason', '')})"
@@ -325,10 +354,14 @@ def _build_system_message(state: Dict) -> Dict:
 
     min_files = min(15, max(6, int(summary["file_count"] * 0.65)))
 
+    dir_tree = _build_dir_tree(cached_files)
+    dir_tree_section = f"Repository structure:\n{dir_tree}\n\n" if dir_tree else ""
+
     content = (
         f"You are analyzing the architecture of the repository '{summary['repo']}'.\n"
         f"Total source files: {summary['file_count']} | "
-        f"Languages: {', '.join(summary['languages'])}\n"
+        f"Languages: {', '.join(summary['languages'])}\n\n"
+        f"{dir_tree_section}"
         f"Already explored: {explored_str}\n"
         f"Open questions: {unknowns_str}\n\n"
         f"Suggested starting candidates:\n{candidate_lines}\n\n"
