@@ -1,8 +1,29 @@
 import json
+import logging
+import urllib.request
+import urllib.error
 from pathlib import Path
 from typing import Dict
 
 from app.services.analysis_snapshot_service import _compute_dependency_graph_summary
+
+LOGGER = logging.getLogger(__name__)
+_D3_CDN = "https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"
+_D3_CACHE: str | None = None
+
+
+def _get_d3_js() -> str:
+    """Fetch D3 once and cache it in memory. Falls back to CDN tag on failure."""
+    global _D3_CACHE
+    if _D3_CACHE is not None:
+        return _D3_CACHE
+    try:
+        with urllib.request.urlopen(_D3_CDN, timeout=15) as resp:
+            _D3_CACHE = resp.read().decode("utf-8")
+            return _D3_CACHE
+    except Exception as exc:
+        LOGGER.warning("Could not fetch D3 for embedding (%s), using CDN tag.", exc)
+        return ""
 
 
 def generate_html_report(final_state: Dict, interpretation: Dict | None, output_path: Path) -> Path:
@@ -27,13 +48,21 @@ def _build_report_payload(final_state: Dict, interpretation: Dict | None) -> Dic
 
     internal_edges = graph_summary.get("internal_edges", [])
     explored_set = set(node_file_paths)
+    # Include edges where the source was explored, even if the target was not.
     visible_edges = [
         {"source": edge["from"], "target": edge["to"]}
         for edge in internal_edges
-        if edge.get("from") in explored_set and edge.get("to") in explored_set
+        if edge.get("from") in explored_set
     ]
 
-    incoming_count: Dict[str, int] = {file_path: 0 for file_path in node_file_paths}
+    # Targets that were never explored become phantom nodes.
+    phantom_ids = {
+        edge["target"] for edge in visible_edges
+        if edge["target"] not in explored_set
+    }
+
+    all_node_ids = list(node_file_paths) + list(phantom_ids)
+    incoming_count: Dict[str, int] = {file_path: 0 for file_path in all_node_ids}
     for edge in visible_edges:
         target = edge.get("target")
         if target in incoming_count:
@@ -54,13 +83,19 @@ def _build_report_payload(final_state: Dict, interpretation: Dict | None) -> Dic
                 "in_degree": incoming_count.get(file_path, 0),
             }
         )
-    node_ids = {node["id"] for node in nodes}
-    visible_edges = [
-        edge
-        for edge in visible_edges
-        if edge.get("source") in node_ids and edge.get("target") in node_ids
-    ]
-
+    for file_path in phantom_ids:
+        nodes.append(
+            {
+                "id": file_path,
+                "cluster": "unvisited",
+                "role_hint": "unknown",
+                "language": "unknown",
+                "imports_count": 0,
+                "imported_modules": [],
+                "line_count_bucket": "unknown",
+                "in_degree": incoming_count.get(file_path, 0),
+            }
+        )
     interpretation = interpretation or {}
     main_components = interpretation.get("main_components", [])
     key_dependencies = interpretation.get("key_dependencies", [])
@@ -94,6 +129,8 @@ def _build_report_payload(final_state: Dict, interpretation: Dict | None) -> Dic
 
 def _render_html(payload: Dict) -> str:
     data_json = json.dumps(payload).replace("</script>", "<\\/script>")
+    d3_js = _get_d3_js()
+    d3_tag = f"<script>{d3_js}</script>" if d3_js else f'<script src="{_D3_CDN}"></script>'
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -217,7 +254,7 @@ def _render_html(payload: Dict) -> str:
     <section class="panel">
       <h2>Dependency Graph</h2>
       <svg id="graph" width="100%" height="680"></svg>
-      <div class="legend">Node size = incoming internal dependencies. Color = cluster.</div>
+      <div class="legend">Node size = incoming internal dependencies. Color = cluster. Grey dashed = imported but not explored.</div>
     </section>
 
     <section class="panel">
@@ -247,7 +284,7 @@ def _render_html(payload: Dict) -> str:
     </section>
   </div>
   <div class="tooltip" id="tooltip"></div>
-  <script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+  {d3_tag}
   <script>
     window.REPORT_DATA = {data_json};
 
@@ -305,8 +342,9 @@ def _render_html(payload: Dict) -> str:
     const height = bbox.height || 680;
     const tooltip = d3.select("#tooltip");
 
-    const clusterDomain = [...new Set(nodes.map(n => n.cluster))];
-    const color = d3.scaleOrdinal(clusterDomain, d3.schemeTableau10);
+    const clusterDomain = [...new Set(nodes.map(n => n.cluster).filter(c => c !== "unvisited"))];
+    const _color = d3.scaleOrdinal(clusterDomain, d3.schemeTableau10);
+    const color = c => c === "unvisited" ? "#c4c8d0" : _color(c);
 
     const simulation = d3.forceSimulation(nodes)
       .force("link", d3.forceLink(links).id(d => d.id).distance(120))
@@ -344,6 +382,7 @@ def _render_html(payload: Dict) -> str:
       .join("circle")
       .attr("r", d => 10 + Math.min(14, (d.in_degree || 0) * 2))
       .attr("fill", d => color(d.cluster))
+      .attr("stroke-dasharray", d => d.cluster === "unvisited" ? "4,2" : null)
       .call(d3.drag()
         .on("start", dragstarted)
         .on("drag", dragged)
@@ -372,6 +411,12 @@ def _render_html(payload: Dict) -> str:
       .attr("dy", 4);
 
     simulation.on("tick", () => {{
+      nodes.forEach(d => {{
+        const r = 10 + Math.min(14, (d.in_degree || 0) * 2);
+        d.x = Math.max(r, Math.min(width - r, d.x));
+        d.y = Math.max(r, Math.min(height - r, d.y));
+      }});
+
       svg.selectAll("line")
         .attr("x1", d => d.source.x)
         .attr("y1", d => d.source.y)
@@ -393,8 +438,9 @@ def _render_html(payload: Dict) -> str:
       d.fy = d.y;
     }}
     function dragged(event, d) {{
-      d.fx = event.x;
-      d.fy = event.y;
+      const r = 10 + Math.min(14, (d.in_degree || 0) * 2);
+      d.fx = Math.max(r, Math.min(width - r, event.x));
+      d.fy = Math.max(r, Math.min(height - r, event.y));
     }}
     function dragended(event, d) {{
       if (!event.active) simulation.alphaTarget(0);

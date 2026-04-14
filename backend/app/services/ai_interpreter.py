@@ -1,16 +1,18 @@
 import json
 import logging
 import re
+import time
 import urllib.error
 import urllib.request
 from typing import Dict, Optional
 
 from app.services.analysis_snapshot_service import _compute_dependency_graph_summary
+from app.core.config import settings
 
 LOGGER = logging.getLogger(__name__)
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "qwen2.5-coder:7b"
+OLLAMA_MODEL = settings.OLLAMA_MODEL
 
 
 def interpret_architecture(analysis_state: Dict) -> Optional[Dict]:
@@ -23,7 +25,15 @@ def interpret_architecture(analysis_state: Dict) -> Optional[Dict]:
         payload = _build_interpretation_payload(analysis_state, graph_summary)
         prompt = _build_prompt(payload)
         response_text = _call_ollama(prompt)
-        return _parse_interpretation_json(response_text)
+        parsed = _parse_interpretation_json(response_text)
+        if parsed is not None:
+            explored_paths = {
+                fact["file_path"]
+                for fact in analysis_state.get("inspected_facts", [])
+                if fact.get("file_path")
+            }
+            parsed = _validate_interpretation(parsed, explored_paths)
+        return parsed
     except Exception as exc:  # pragma: no cover - fallback safety for optional layer
         LOGGER.warning("AI interpretation failed: %s", exc)
         return None
@@ -80,6 +90,9 @@ def _build_prompt(payload: Dict) -> str:
     )
 
 
+_RETRY_DELAYS = [1, 2]  # seconds between attempts; total = 3 tries
+
+
 def _call_ollama(prompt: str) -> str:
     request_body = {
         "model": OLLAMA_MODEL,
@@ -90,21 +103,28 @@ def _call_ollama(prompt: str) -> str:
         },
     }
 
-    request = urllib.request.Request(
-        OLLAMA_URL,
-        data=json.dumps(request_body).encode("utf-8"),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
+    last_exc: Exception = RuntimeError("No attempts made")
+    for attempt, _ in enumerate(["first"] + _RETRY_DELAYS):
+        if attempt > 0:
+            delay = _RETRY_DELAYS[attempt - 1]
+            LOGGER.warning("Ollama call failed (attempt %d), retrying in %ds…", attempt, delay)
+            time.sleep(delay)
 
-    try:
-        with urllib.request.urlopen(request, timeout=120) as response:
-            raw = response.read().decode("utf-8")
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Ollama request failed: {exc}") from exc
+        request = urllib.request.Request(
+            OLLAMA_URL,
+            data=json.dumps(request_body).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=60) as response:
+                raw = response.read().decode("utf-8")
+            payload = json.loads(raw)
+            return payload.get("response", "")
+        except urllib.error.URLError as exc:
+            last_exc = exc
 
-    payload = json.loads(raw)
-    return payload.get("response", "")
+    raise RuntimeError(f"Ollama request failed after {len(_RETRY_DELAYS) + 1} attempts: {last_exc}") from last_exc
 
 
 def _parse_interpretation_json(response_text: str) -> Optional[Dict]:
@@ -127,6 +147,28 @@ def _parse_interpretation_json(response_text: str) -> Optional[Dict]:
         return None
 
     return parsed
+
+
+def _validate_interpretation(interpretation: Dict, explored_paths: set) -> Dict:
+    """
+    Strip phantom file references from the AI output.
+    - Components: filter file list to explored files only, but keep the component
+      even if no files survive (name + description are still meaningful).
+    - Key dependencies: only keep edges where both endpoints were actually explored.
+    """
+    components = []
+    for component in interpretation.get("main_components", []):
+        valid_files = [f for f in component.get("files", []) if f in explored_paths]
+        # Keep component regardless — just trim the file list.
+        components.append({**component, "files": valid_files})
+    interpretation["main_components"] = components
+
+    interpretation["key_dependencies"] = [
+        dep for dep in interpretation.get("key_dependencies", [])
+        if dep.get("from") in explored_paths and dep.get("to") in explored_paths
+    ]
+
+    return interpretation
 
 
 def _load_json_loose(text: str) -> Optional[Dict]:

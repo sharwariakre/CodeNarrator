@@ -56,6 +56,7 @@ class AnalysisState(BaseModel):
     inspected_facts: list[InspectedFileFact] = Field(default_factory=list)
     dependency_edges: list[DependencyEdge] = Field(default_factory=list)
     dependency_graph_summary: dict = Field(default_factory=dict)
+    package_roots: list[str] = Field(default_factory=list)
     unknowns: list[str]
     current_summary: RepoSummary
     confidence: float
@@ -73,7 +74,18 @@ class RepoAnalysisSnapshotResponse(BaseModel):
 
 class AnalysisLoopRequest(BaseModel):
     analysis_state: AnalysisState
-    max_steps: int = 5
+    max_steps: int = 15
+
+
+class CachedStateRequest(BaseModel):
+    repo_id: str
+    local_path: str
+
+
+class CachedStateResponse(BaseModel):
+    repo_id: str
+    found: bool
+    final_state: AnalysisState | None = None
 
 
 class AnalysisStepTrace(BaseModel):

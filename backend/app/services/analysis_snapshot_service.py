@@ -1,4 +1,5 @@
 import ast
+import posixpath
 import re
 from collections import Counter, defaultdict
 from pathlib import Path
@@ -16,6 +17,7 @@ def build_analysis_snapshot(repo_path: Path) -> Dict:
     """
     scan_result = scan_repository(repo_path)
     metadata = extract_repo_metadata(repo_path, scan_result)
+    package_roots = _detect_python_package_roots(repo_path, scan_result["files"])
 
     repo_summary = {
         "repo": scan_result["repo"],
@@ -42,6 +44,7 @@ def build_analysis_snapshot(repo_path: Path) -> Dict:
         "inspected_facts": [],
         "dependency_edges": [],
         "unknowns": unknowns,
+        "package_roots": package_roots,
         "current_summary": repo_summary,
         "confidence": confidence,
         "no_progress_steps": 0,
@@ -73,6 +76,7 @@ def advance_analysis_state(current_state: Dict) -> Dict:
         "inspected_facts": [dict(f) for f in current_state.get("inspected_facts", [])],
         "dependency_edges": [dict(e) for e in current_state.get("dependency_edges", [])],
         "unknowns": list(current_state.get("unknowns", [])),
+        "package_roots": list(current_state.get("package_roots", [])),
         "current_summary": dict(current_state["current_summary"]),
         "confidence": float(current_state.get("confidence", 0.0)),
         "no_progress_steps": int(current_state.get("no_progress_steps", 0)),
@@ -83,6 +87,9 @@ def advance_analysis_state(current_state: Dict) -> Dict:
     if candidate_file is None:
         next_state["stop_reason"] = "No remaining candidate files to inspect."
         return next_state
+
+    # Check before exploring so the pre-exploration dep_edges are used.
+    candidate_is_import_target = candidate_file in _resolved_import_targets(next_state)
 
     inspected = _inspect_file(next_state, candidate_file)
     if inspected is None:
@@ -101,6 +108,7 @@ def advance_analysis_state(current_state: Dict) -> Dict:
     unknowns_before = list(next_state["unknowns"])
 
     fact_evidence = _record_inspected_fact(next_state, inspected)
+    fact_evidence["explored_import_target"] = candidate_is_import_target
     _record_dependency_edge(next_state, inspected)
     summary_evidence = _refine_summary(next_state, inspected)
     unknowns_cleared = _reduce_unknowns(next_state, inspected)
@@ -114,7 +122,7 @@ def advance_analysis_state(current_state: Dict) -> Dict:
 
     summary_changed = _summary_progress_signature(next_state["current_summary"]) != summary_before
     unknowns_changed = next_state["unknowns"] != unknowns_before
-    meaningful_progress = summary_changed or unknowns_changed or confidence_evidence
+    meaningful_progress = summary_changed or unknowns_changed or confidence_evidence or fact_evidence.get("explored_import_target", False)
 
     if meaningful_progress:
         next_state["no_progress_steps"] = 0
@@ -131,7 +139,7 @@ def advance_analysis_state(current_state: Dict) -> Dict:
     return next_state
 
 
-def run_analysis_loop(initial_state: Dict, max_steps: int = 5) -> Dict:
+def run_analysis_loop(initial_state: Dict, max_steps: int = 15) -> Dict:
     """
     Run deterministic multi-step analysis until stop condition or max_steps.
     """
@@ -438,6 +446,7 @@ def _copy_state(state: Dict) -> Dict:
         "inspected_facts": [dict(f) for f in state.get("inspected_facts", [])],
         "dependency_edges": [dict(e) for e in state.get("dependency_edges", [])],
         "unknowns": list(state.get("unknowns", [])),
+        "package_roots": list(state.get("package_roots", [])),
         "current_summary": dict(state["current_summary"]),
         "confidence": float(state.get("confidence", 0.0)),
         "no_progress_steps": int(state.get("no_progress_steps", 0)),
@@ -629,12 +638,13 @@ def _refresh_candidates_for_signal(state: Dict, limit: int) -> None:
     file_languages: Dict[str, str] = scan_result["file_languages"]
     explored = set(state["explored_files"])
 
+    known_targets = _resolved_import_targets(state)
     scored: List[Tuple[Tuple[int, str], Dict]] = []
     for file_path in files:
         if file_path in explored:
             continue
 
-        score, reasons = _candidate_signal_score(state, file_path, file_languages)
+        score, reasons = _candidate_signal_score(state, file_path, file_languages, known_targets)
         if score <= 0:
             continue
         scored.append(
@@ -651,11 +661,12 @@ def _refresh_candidates_for_signal(state: Dict, limit: int) -> None:
 
     candidates = [candidate for _, candidate in scored[:limit]]
     if not candidates:
+        # Score threshold unmet — pick a small deterministic sample, not all unexplored files.
         fallback = sorted(fp for fp in files if fp not in explored)[:limit]
         candidates = [
             {
                 "file_path": file_path,
-                "reason": "Fallback candidate (deterministic unexplored source file).",
+                "reason": "Fallback candidate (no signal score; deterministic sample).",
             }
             for file_path in fallback
         ]
@@ -663,10 +674,24 @@ def _refresh_candidates_for_signal(state: Dict, limit: int) -> None:
     state["candidate_files"] = candidates
 
 
+def _resolved_import_targets(state: Dict) -> Set[str]:
+    """Return the set of internal file paths that explored files import."""
+    targets: Set[str] = set()
+    for edge in state.get("dependency_edges", []):
+        source = edge["source"]
+        source_dir = posixpath.dirname(source)
+        for imp in edge.get("imports", []):
+            if imp.startswith(("./", "../")):
+                resolved = posixpath.normpath(posixpath.join(source_dir, imp))
+                targets.add(resolved)
+    return targets
+
+
 def _candidate_signal_score(
     state: Dict,
     file_path: str,
     file_languages: Dict[str, str],
+    known_targets: Set[str] | None = None,
 ) -> Tuple[int, List[str]]:
     name = Path(file_path).name
     top_level_dir = Path(file_path).parts[0] if Path(file_path).parts else ""
@@ -720,6 +745,15 @@ def _candidate_signal_score(
     if top_level_dir in {"docs", "tests"}:
         score -= 2
 
+    # Boost files that are known import targets from already-explored files.
+    # These are high-value: exploring them reveals their own imports and
+    # completes the dependency graph rather than hitting dead-end files.
+    if known_targets is None:
+        known_targets = _resolved_import_targets(state)
+    if file_path in known_targets:
+        score += 5
+        reasons.append("known import target from explored files")
+
     if role_hint == "test":
         score -= 2
         if "No obvious entry points found by filename heuristics." in unresolved_unknowns:
@@ -743,6 +777,10 @@ def _extract_imports_for_file(*, content: str, language: str) -> List[str]:
         return _extract_python_imports(content)
     if language in {"javascript", "typescript"}:
         return _extract_javascript_imports(content)
+    if language == "java":
+        return _extract_java_imports(content)
+    if language == "go":
+        return _extract_go_imports(content)
     return []
 
 
@@ -814,9 +852,47 @@ def _extract_javascript_imports(content: str) -> List[str]:
     return imports
 
 
+def _extract_java_imports(content: str) -> List[str]:
+    imports: List[str] = []
+    seen: Set[str] = set()
+    for match in re.finditer(r"^\s*import\s+(?:static\s+)?([\w.]+)\s*;", content, re.MULTILINE):
+        module = match.group(1).strip()
+        if module and module not in seen:
+            imports.append(module)
+            seen.add(module)
+    return imports
+
+
+def _extract_go_imports(content: str) -> List[str]:
+    imports: List[str] = []
+    seen: Set[str] = set()
+
+    # Single import: import "path/to/pkg"
+    for match in re.finditer(r'^\s*import\s+"([^"]+)"', content, re.MULTILINE):
+        module = match.group(1).strip()
+        if module and module not in seen:
+            imports.append(module)
+            seen.add(module)
+
+    # Grouped import block: import ( "pkg1" alias "pkg2" )
+    block_match = re.search(r"import\s*\(([^)]+)\)", content, re.DOTALL)
+    if block_match:
+        for line in block_match.group(1).splitlines():
+            m = re.search(r'"([^"]+)"', line)
+            if m:
+                module = m.group(1).strip()
+                if module and module not in seen:
+                    imports.append(module)
+                    seen.add(module)
+
+    return imports
+
+
 def _compute_dependency_graph_summary(state: Dict) -> Dict:
     edges = state.get("dependency_edges", [])
     repo_path = Path(state["current_summary"]["local_path"]).resolve()
+    scanned_files = set(scan_repository(repo_path)["files"])
+    package_roots = [Path(root) for root in state.get("package_roots", [])]
 
     imported_counter: Counter[str] = Counter()
     file_import_counts: List[Dict] = []
@@ -837,6 +913,8 @@ def _compute_dependency_graph_summary(state: Dict) -> Dict:
                 repo_path=repo_path,
                 source_file=source,
                 import_specifier=module,
+                package_roots=package_roots,
+                scanned_files=scanned_files,
             )
             if resolved_internal is not None:
                 internal_edge_set.add((source, resolved_internal))
@@ -872,7 +950,7 @@ def _compute_dependency_graph_summary(state: Dict) -> Dict:
     internal_edges = [
         {"from": source, "to": target}
         for source, target in sorted(internal_edge_set)
-    ]
+    ][:500]  # cap to avoid large payloads on complex repos
 
     return {
         "most_imported_modules": most_imported_modules,
@@ -899,6 +977,8 @@ def _resolve_internal_import(
     repo_path: Path,
     source_file: str,
     import_specifier: str,
+    package_roots: List[Path],
+    scanned_files: Set[str],
 ) -> str | None:
     source_abs = (repo_path / source_file).resolve()
     source_dir = source_abs.parent
@@ -910,6 +990,11 @@ def _resolve_internal_import(
     if _is_python_relative_import(import_specifier):
         resolved = _resolve_python_relative_import(repo_path, source_dir, import_specifier)
         return str(resolved.relative_to(repo_path)) if resolved else None
+
+    if _should_attempt_absolute_python_resolution(import_specifier, package_roots, scanned_files):
+        resolved = _resolve_absolute_import(import_specifier, package_roots, scanned_files)
+        if resolved is not None:
+            return resolved
 
     return None
 
@@ -942,6 +1027,99 @@ def _resolve_python_relative_import(repo_path: Path, source_dir: Path, import_sp
 
     candidate_base = target_dir / module.replace(".", "/") if module else target_dir
     return _resolve_candidate_path(repo_path, candidate_base, [".py"])
+
+
+def _detect_python_package_roots(repo_path: Path, scanned_files: List[str]) -> List[str]:
+    package_roots: List[str] = []
+    scanned_set = set(scanned_files)
+    repo_has_python = any(path.endswith(".py") for path in scanned_files)
+    if not repo_has_python:
+        return package_roots
+
+    has_src_layout = any(path.startswith("src/") for path in scanned_files) and any(
+        path.startswith("src/") and path.endswith("/__init__.py")
+        for path in scanned_files
+    )
+    if has_src_layout:
+        package_roots.append("src")
+
+    flat_package_dirs = sorted(
+        {
+            Path(path).parts[0]
+            for path in scanned_files
+            if len(Path(path).parts) >= 2 and path.endswith("/__init__.py")
+        }
+    )
+    if flat_package_dirs:
+        package_roots.append(".")
+
+    unique_roots: List[str] = []
+    seen: Set[str] = set()
+    for root in package_roots:
+        if root not in seen:
+            unique_roots.append(root)
+            seen.add(root)
+
+    return unique_roots
+
+
+def _should_attempt_absolute_python_resolution(
+    import_specifier: str,
+    package_roots: List[Path],
+    scanned_files: Set[str],
+) -> bool:
+    if not import_specifier or not package_roots:
+        return False
+
+    first_segment = import_specifier.split(".", 1)[0]
+    if not first_segment:
+        return False
+
+    known_top_level_names = _known_top_level_package_names(package_roots, scanned_files)
+    return first_segment in known_top_level_names
+
+
+def _resolve_absolute_import(
+    module_string: str,
+    package_roots: List[Path],
+    scanned_files: Set[str],
+) -> str | None:
+    module_path = module_string.replace(".", "/")
+
+    for package_root in package_roots:
+        root_prefix = package_root.as_posix().strip(".")
+        if root_prefix:
+            file_candidate = f"{root_prefix}/{module_path}.py"
+            init_candidate = f"{root_prefix}/{module_path}/__init__.py"
+        else:
+            file_candidate = f"{module_path}.py"
+            init_candidate = f"{module_path}/__init__.py"
+
+        if file_candidate in scanned_files:
+            return file_candidate
+        if init_candidate in scanned_files:
+            return init_candidate
+
+    return None
+
+
+def _known_top_level_package_names(package_roots: List[Path], scanned_files: Set[str]) -> Set[str]:
+    names: Set[str] = set()
+    for package_root in package_roots:
+        root_prefix = package_root.as_posix().strip(".")
+        for file_path in scanned_files:
+            parts = Path(file_path).parts
+            if not parts:
+                continue
+            if root_prefix:
+                root_parts = tuple(Path(root_prefix).parts)
+                if parts[: len(root_parts)] != root_parts:
+                    continue
+                if len(parts) > len(root_parts):
+                    names.add(parts[len(root_parts)])
+            else:
+                names.add(parts[0])
+    return names
 
 
 def _resolve_candidate_path(repo_path: Path, candidate_base: Path, extensions: List[str]) -> Path | None:

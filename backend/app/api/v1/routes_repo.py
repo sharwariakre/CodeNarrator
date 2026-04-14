@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 import re
 
@@ -6,6 +7,8 @@ from app.core.config import settings
 from app.models import (
     AnalysisLoopRequest,
     AnalysisLoopResponse,
+    CachedStateRequest,
+    CachedStateResponse,
     GenerateReportRequest,
     GenerateReportResponse,
     IngestRepoRequest,
@@ -18,10 +21,12 @@ from app.models import (
 from app.services.git_service import clone_or_update_repo, GitCloneError
 from app.services.analysis_snapshot_service import (
     build_analysis_snapshot,
-    run_analysis_loop,
+    run_analysis_loop,  # kept but not called — heuristic fallback
 )
+from app.services.agentic_analysis_service import run_agentic_analysis_loop
 from app.services.ai_interpreter import interpret_architecture
 from app.services.report_generator import generate_html_report
+from app.services.analysis_state_store import save_state, load_state
 
 router = APIRouter(prefix="/repos", tags=["repos"])
 
@@ -33,9 +38,10 @@ async def ingest_repo(payload: IngestRepoRequest):
     This will later trigger parsing, embeddings, etc.
     """
     try:
-        local_path = clone_or_update_repo(
+        local_path = await asyncio.to_thread(
+            clone_or_update_repo,
             repo_url=payload.repo_url,
-            force_clean=payload.force_clean
+            force_clean=payload.force_clean,
         )
     except GitCloneError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -52,7 +58,9 @@ async def get_repo_snapshot(payload: RepoAnalysisSnapshotRequest):
     requested_path = _resolve_local_path(payload.local_path)
     repo_base_dir = _resolve_repo_base_dir()
 
-    if not requested_path.is_relative_to(repo_base_dir):
+    try:
+        requested_path.relative_to(repo_base_dir)
+    except ValueError:
         raise HTTPException(
             status_code=400,
             detail=f"local_path must be inside {repo_base_dir}",
@@ -65,7 +73,7 @@ async def get_repo_snapshot(payload: RepoAnalysisSnapshotRequest):
         )
 
     try:
-        snapshot = build_analysis_snapshot(requested_path)
+        snapshot = await asyncio.to_thread(build_analysis_snapshot, requested_path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -78,7 +86,9 @@ async def run_repo_snapshot_loop(payload: AnalysisLoopRequest):
     local_path = payload.analysis_state.current_summary.local_path
     requested_path = _resolve_local_path(local_path)
 
-    if not requested_path.is_relative_to(repo_base_dir):
+    try:
+        requested_path.relative_to(repo_base_dir)
+    except ValueError:
         raise HTTPException(
             status_code=400,
             detail=f"analysis_state.current_summary.local_path must be inside {repo_base_dir}",
@@ -90,16 +100,38 @@ async def run_repo_snapshot_loop(payload: AnalysisLoopRequest):
             detail=f"Repository path not found: {requested_path}",
         )
 
-    loop_result = run_analysis_loop(
-        initial_state=payload.analysis_state.model_dump(),
-        max_steps=payload.max_steps,
+    initial_state = payload.analysis_state.model_dump()
+    loop_result = await asyncio.to_thread(
+        run_agentic_analysis_loop, initial_state, payload.max_steps
+    )
+    final_state = loop_result["final_state"]
+    save_state(
+        repo_id=final_state["repo_id"],
+        local_path=final_state["current_summary"]["local_path"],
+        final_state=final_state,
+        cache_dir=_resolve_cache_dir(),
     )
     return AnalysisLoopResponse(**loop_result)
 
 
+@router.post("/state", response_model=CachedStateResponse)
+async def get_cached_state(payload: CachedStateRequest):
+    """Return persisted analysis state if it exists and matches current git HEAD."""
+    cached = load_state(
+        repo_id=payload.repo_id,
+        local_path=payload.local_path,
+        cache_dir=_resolve_cache_dir(),
+    )
+    if cached is None:
+        return CachedStateResponse(repo_id=payload.repo_id, found=False)
+    return CachedStateResponse(repo_id=payload.repo_id, found=True, final_state=cached)
+
+
 @router.post("/interpret", response_model=InterpretArchitectureResponse)
 async def interpret_repo_architecture(payload: InterpretArchitectureRequest):
-    interpretation = interpret_architecture(payload.final_state.model_dump())
+    interpretation = await asyncio.to_thread(
+        interpret_architecture, payload.final_state.model_dump()
+    )
     return InterpretArchitectureResponse(interpretation=interpretation)
 
 
@@ -109,7 +141,8 @@ async def generate_repo_report(payload: GenerateReportRequest):
     safe_name = _sanitize_output_filename(payload.output_filename)
     output_path = reports_dir / safe_name
 
-    saved_path = generate_html_report(
+    saved_path = await asyncio.to_thread(
+        generate_html_report,
         final_state=payload.final_state.model_dump(),
         interpretation=payload.interpretation,
         output_path=output_path,
@@ -129,6 +162,13 @@ def _resolve_repo_base_dir() -> Path:
     if not repo_base_dir.is_absolute():
         return (Path.cwd() / repo_base_dir).resolve()
     return repo_base_dir.resolve()
+
+
+def _resolve_cache_dir() -> Path:
+    cache_dir = settings.ANALYSIS_CACHE_DIR
+    if not cache_dir.is_absolute():
+        return (Path.cwd() / cache_dir).resolve()
+    return cache_dir.resolve()
 
 
 def _resolve_reports_dir() -> Path:
