@@ -38,9 +38,10 @@ async def ingest_repo(payload: IngestRepoRequest):
     This will later trigger parsing, embeddings, etc.
     """
     try:
-        local_path = clone_or_update_repo(
+        local_path = await asyncio.to_thread(
+            clone_or_update_repo,
             repo_url=payload.repo_url,
-            force_clean=payload.force_clean
+            force_clean=payload.force_clean,
         )
     except GitCloneError as e:
         raise HTTPException(status_code=400, detail=str(e))
@@ -70,7 +71,7 @@ async def get_repo_snapshot(payload: RepoAnalysisSnapshotRequest):
         )
 
     try:
-        snapshot = build_analysis_snapshot(requested_path)
+        snapshot = await asyncio.to_thread(build_analysis_snapshot, requested_path)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
@@ -124,7 +125,9 @@ async def get_cached_state(payload: CachedStateRequest):
 
 @router.post("/interpret", response_model=InterpretArchitectureResponse)
 async def interpret_repo_architecture(payload: InterpretArchitectureRequest):
-    interpretation = interpret_architecture(payload.final_state.model_dump())
+    interpretation = await asyncio.to_thread(
+        interpret_architecture, payload.final_state.model_dump()
+    )
     return InterpretArchitectureResponse(interpretation=interpretation)
 
 
@@ -134,7 +137,8 @@ async def generate_repo_report(payload: GenerateReportRequest):
     safe_name = _sanitize_output_filename(payload.output_filename)
     output_path = reports_dir / safe_name
 
-    saved_path = generate_html_report(
+    saved_path = await asyncio.to_thread(
+        generate_html_report,
         final_state=payload.final_state.model_dump(),
         interpretation=payload.interpretation,
         output_path=output_path,
