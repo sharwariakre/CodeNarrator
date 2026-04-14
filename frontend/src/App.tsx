@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from "react";
 import {
   ingestRepo,
   getSnapshot,
-  runLoop,
+  runLoopStream,
   interpretArchitecture,
   generateReport,
   fetchReportHtml,
@@ -60,6 +60,7 @@ export default function App() {
   const [reportHtml, setReportHtml] = useState<string | null>(null);
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [depthIdx, setDepthIdx]     = useState(1); // default: Standard
+  const [liveFile, setLiveFile]     = useState<string | null>(null);
 
   function updateStep(id: string, patch: Partial<Step>) {
     setSteps((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
@@ -87,9 +88,15 @@ export default function App() {
         detail: `${snapshot.repo_summary.file_count} files · ${snapshot.repo_summary.languages.join(", ")}`,
       });
 
-      // 3. Analysis loop
+      // 3. Analysis loop (streaming)
       updateStep("loop", { status: "running" });
-      const loopResult = await runLoop(snapshot.analysis_state, DEPTH_OPTIONS[depthIdx].steps);
+      setLiveFile(null);
+      const loopResult = await runLoopStream(
+        snapshot.analysis_state,
+        DEPTH_OPTIONS[depthIdx].steps,
+        (evt) => setLiveFile(`${evt.file} · ${evt.explored} files · ${(evt.confidence * 100).toFixed(0)}%`),
+      );
+      setLiveFile(null);
       const finalState: AnalysisState = loopResult.final_state;
       updateStep("loop", {
         status: "done",
@@ -123,6 +130,7 @@ export default function App() {
       const html = await fetchReportHtml(reportResp.report_path);
       setReportHtml(html);
     } catch (err: unknown) {
+      setLiveFile(null);
       const msg = err instanceof Error ? err.message : String(err);
       setGlobalError(msg);
       setSteps((prev) =>
@@ -184,7 +192,9 @@ export default function App() {
                 <span className="step-icon">{ICONS[step.status]}</span>
                 <span className="step-label">{step.label}</span>
                 {isLoopRunning
-                  ? <ElapsedTimer prefix="Running… " />
+                  ? liveFile
+                    ? <span className="step-detail">{liveFile}</span>
+                    : <ElapsedTimer prefix="Waiting for model… " />
                   : step.detail && <span className="step-detail">{step.detail}</span>
                 }
               </div>

@@ -9,7 +9,7 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import ollama
 
@@ -169,7 +169,11 @@ _TOOLS = [
 ]
 
 
-def run_agentic_analysis_loop(initial_state: Dict, max_steps: int = 15) -> Dict:
+def run_agentic_analysis_loop(
+    initial_state: Dict,
+    max_steps: int = 15,
+    on_progress: Optional[Callable[[Dict], None]] = None,
+) -> Dict:
     """
     Agentic replacement for run_analysis_loop.
 
@@ -221,6 +225,9 @@ def run_agentic_analysis_loop(initial_state: Dict, max_steps: int = 15) -> Dict:
                 })
                 new_file = _newly_explored_file(previous_explored, state["explored_files"])
                 step_trace.append(_trace_entry(step, new_file, state))
+                if on_progress and new_file:
+                    on_progress({"type": "progress", "file": new_file, "step": step,
+                                 "explored": len(state["explored_files"]), "confidence": round(state["confidence"], 2)})
                 consecutive_no_file_steps = 0
                 continue
             else:
@@ -271,6 +278,9 @@ def run_agentic_analysis_loop(initial_state: Dict, max_steps: int = 15) -> Dict:
                     explored_this_step = new_file
                     file_explored_this_step = True
                     previous_explored = list(state["explored_files"])
+                    if on_progress:
+                        on_progress({"type": "progress", "file": new_file, "step": step,
+                                     "explored": len(state["explored_files"]), "confidence": round(state["confidence"], 2)})
             elif side_effect == "stop":
                 stop_this_step = True
 

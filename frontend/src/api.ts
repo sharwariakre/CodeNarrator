@@ -101,6 +101,49 @@ export async function runLoop(state: AnalysisState, maxSteps = 15): Promise<Loop
   return res.json();
 }
 
+export interface ProgressEvent {
+  type: "progress";
+  file: string;
+  step: number;
+  explored: number;
+  confidence: number;
+}
+
+export async function runLoopStream(
+  state: AnalysisState,
+  maxSteps: number,
+  onProgress: (event: ProgressEvent) => void,
+): Promise<LoopResponse> {
+  const res = await fetch(`${BASE}/snapshot/run/stream`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ analysis_state: state, max_steps: maxSteps }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail ?? res.statusText);
+  }
+
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    const lines = buffer.split("\n");
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      if (!line.startsWith("data: ")) continue;
+      const payload = JSON.parse(line.slice(6));
+      if (payload.type === "done") return payload as LoopResponse;
+      if (payload.type === "progress") onProgress(payload as ProgressEvent);
+    }
+  }
+  throw new Error("Stream ended without a done event");
+}
+
 export async function interpretArchitecture(finalState: AnalysisState): Promise<InterpretResponse> {
   const res = await fetch(`${BASE}/interpret`, {
     method: "POST",
