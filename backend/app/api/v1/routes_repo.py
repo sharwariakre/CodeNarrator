@@ -1,8 +1,10 @@
 import asyncio
+import json
 from pathlib import Path
 import re
 
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
 from app.core.config import settings
 from app.models import (
     AnalysisLoopRequest,
@@ -112,6 +114,65 @@ async def run_repo_snapshot_loop(payload: AnalysisLoopRequest):
         cache_dir=_resolve_cache_dir(),
     )
     return AnalysisLoopResponse(**loop_result)
+
+
+@router.post("/snapshot/run/stream")
+async def stream_repo_snapshot_loop(payload: AnalysisLoopRequest):
+    """
+    Same as /snapshot/run but streams Server-Sent Events during the loop.
+    Each event is a JSON line prefixed with 'data: '.
+    Intermediate events: {"type": "progress", "file": "...", "step": n, "explored": n, "confidence": x}
+    Final event:        {"type": "done", ...AnalysisLoopResponse fields...}
+    """
+    repo_base_dir = _resolve_repo_base_dir()
+    local_path = payload.analysis_state.current_summary.local_path
+    requested_path = _resolve_local_path(local_path)
+
+    try:
+        requested_path.relative_to(repo_base_dir)
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"local_path must be inside {repo_base_dir}")
+
+    if not requested_path.exists() or not requested_path.is_dir():
+        raise HTTPException(status_code=404, detail=f"Repository path not found: {requested_path}")
+
+    initial_state = payload.analysis_state.model_dump()
+    event_loop = asyncio.get_event_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def on_progress(event: dict):
+        event_loop.call_soon_threadsafe(queue.put_nowait, event)
+
+    async def generate():
+        task = asyncio.create_task(
+            asyncio.to_thread(run_agentic_analysis_loop, initial_state, payload.max_steps, on_progress)
+        )
+        # Drain progress events while the loop runs.
+        while not task.done():
+            try:
+                event = await asyncio.wait_for(asyncio.shield(queue.get()), timeout=0.2)
+                yield f"data: {json.dumps(event)}\n\n"
+            except asyncio.TimeoutError:
+                continue
+
+        # Drain any remaining events after the task finishes.
+        while not queue.empty():
+            event = queue.get_nowait()
+            yield f"data: {json.dumps(event)}\n\n"
+
+        loop_result = task.result()
+        final_state = loop_result["final_state"]
+        save_state(
+            repo_id=final_state["repo_id"],
+            local_path=final_state["current_summary"]["local_path"],
+            final_state=final_state,
+            cache_dir=_resolve_cache_dir(),
+        )
+        done_event = {**AnalysisLoopResponse(**loop_result).model_dump(), "type": "done"}
+        yield f"data: {json.dumps(done_event)}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream",
+                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 @router.post("/state", response_model=CachedStateResponse)
