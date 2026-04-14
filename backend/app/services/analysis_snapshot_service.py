@@ -661,11 +661,12 @@ def _refresh_candidates_for_signal(state: Dict, limit: int) -> None:
 
     candidates = [candidate for _, candidate in scored[:limit]]
     if not candidates:
+        # Score threshold unmet — pick a small deterministic sample, not all unexplored files.
         fallback = sorted(fp for fp in files if fp not in explored)[:limit]
         candidates = [
             {
                 "file_path": file_path,
-                "reason": "Fallback candidate (deterministic unexplored source file).",
+                "reason": "Fallback candidate (no signal score; deterministic sample).",
             }
             for file_path in fallback
         ]
@@ -776,6 +777,10 @@ def _extract_imports_for_file(*, content: str, language: str) -> List[str]:
         return _extract_python_imports(content)
     if language in {"javascript", "typescript"}:
         return _extract_javascript_imports(content)
+    if language == "java":
+        return _extract_java_imports(content)
+    if language == "go":
+        return _extract_go_imports(content)
     return []
 
 
@@ -847,6 +852,42 @@ def _extract_javascript_imports(content: str) -> List[str]:
     return imports
 
 
+def _extract_java_imports(content: str) -> List[str]:
+    imports: List[str] = []
+    seen: Set[str] = set()
+    for match in re.finditer(r"^\s*import\s+(?:static\s+)?([\w.]+)\s*;", content, re.MULTILINE):
+        module = match.group(1).strip()
+        if module and module not in seen:
+            imports.append(module)
+            seen.add(module)
+    return imports
+
+
+def _extract_go_imports(content: str) -> List[str]:
+    imports: List[str] = []
+    seen: Set[str] = set()
+
+    # Single import: import "path/to/pkg"
+    for match in re.finditer(r'^\s*import\s+"([^"]+)"', content, re.MULTILINE):
+        module = match.group(1).strip()
+        if module and module not in seen:
+            imports.append(module)
+            seen.add(module)
+
+    # Grouped import block: import ( "pkg1" alias "pkg2" )
+    block_match = re.search(r"import\s*\(([^)]+)\)", content, re.DOTALL)
+    if block_match:
+        for line in block_match.group(1).splitlines():
+            m = re.search(r'"([^"]+)"', line)
+            if m:
+                module = m.group(1).strip()
+                if module and module not in seen:
+                    imports.append(module)
+                    seen.add(module)
+
+    return imports
+
+
 def _compute_dependency_graph_summary(state: Dict) -> Dict:
     edges = state.get("dependency_edges", [])
     repo_path = Path(state["current_summary"]["local_path"]).resolve()
@@ -909,7 +950,7 @@ def _compute_dependency_graph_summary(state: Dict) -> Dict:
     internal_edges = [
         {"from": source, "to": target}
         for source, target in sorted(internal_edge_set)
-    ]
+    ][:500]  # cap to avoid large payloads on complex repos
 
     return {
         "most_imported_modules": most_imported_modules,

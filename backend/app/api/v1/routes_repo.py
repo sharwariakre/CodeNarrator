@@ -58,7 +58,9 @@ async def get_repo_snapshot(payload: RepoAnalysisSnapshotRequest):
     requested_path = _resolve_local_path(payload.local_path)
     repo_base_dir = _resolve_repo_base_dir()
 
-    if not requested_path.is_relative_to(repo_base_dir):
+    try:
+        requested_path.relative_to(repo_base_dir)
+    except ValueError:
         raise HTTPException(
             status_code=400,
             detail=f"local_path must be inside {repo_base_dir}",
@@ -84,7 +86,9 @@ async def run_repo_snapshot_loop(payload: AnalysisLoopRequest):
     local_path = payload.analysis_state.current_summary.local_path
     requested_path = _resolve_local_path(local_path)
 
-    if not requested_path.is_relative_to(repo_base_dir):
+    try:
+        requested_path.relative_to(repo_base_dir)
+    except ValueError:
         raise HTTPException(
             status_code=400,
             detail=f"analysis_state.current_summary.local_path must be inside {repo_base_dir}",
