@@ -197,6 +197,9 @@ def run_agentic_analysis_loop(initial_state: Dict, max_steps: int = 15) -> Dict:
     messages: List = [_build_system_message(state)]
     step_trace: List[Dict] = []
     consecutive_no_file_steps = 0
+    # Max recent messages to keep (excluding the system prompt at index 0).
+    # Prevents context from growing unboundedly and slowing down Ollama calls.
+    _MAX_HISTORY = 12
 
     for step in range(1, steps_limit + 1):
         if state.get("stop_reason"):
@@ -224,6 +227,10 @@ def run_agentic_analysis_loop(initial_state: Dict, max_steps: int = 15) -> Dict:
                 LOGGER.info("Step %d: all files explored, stopping.", step)
                 state["stop_reason"] = "All candidate files have been explored."
                 break
+
+        # Trim history: always keep system prompt (index 0) + last _MAX_HISTORY messages.
+        if len(messages) > _MAX_HISTORY + 1:
+            messages = [messages[0]] + messages[-_MAX_HISTORY:]
 
         response = _call_model_with_retry(messages, retries=2)
         if response is None:
