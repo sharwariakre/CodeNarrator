@@ -47,12 +47,19 @@ function ElapsedTimer({ prefix }: { prefix: string }) {
   return <span className="step-detail">{prefix}{seconds}s elapsed</span>;
 }
 
+const DEPTH_OPTIONS = [
+  { label: "Quick",    steps: 10, hint: "~3-5 min" },
+  { label: "Standard", steps: 20, hint: "~8-10 min" },
+  { label: "Deep",     steps: 30, hint: "~15 min" },
+];
+
 export default function App() {
   const [url, setUrl]               = useState("");
   const [steps, setSteps]           = useState<Step[]>(makeSteps());
   const [running, setRunning]       = useState(false);
   const [reportHtml, setReportHtml] = useState<string | null>(null);
   const [globalError, setGlobalError] = useState<string | null>(null);
+  const [depthIdx, setDepthIdx]     = useState(1); // default: Standard
 
   function updateStep(id: string, patch: Partial<Step>) {
     setSteps((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
@@ -82,7 +89,7 @@ export default function App() {
 
       // 3. Analysis loop
       updateStep("loop", { status: "running" });
-      const loopResult = await runLoop(snapshot.analysis_state, 20);
+      const loopResult = await runLoop(snapshot.analysis_state, DEPTH_OPTIONS[depthIdx].steps);
       const finalState: AnalysisState = loopResult.final_state;
       updateStep("loop", {
         status: "done",
@@ -152,6 +159,20 @@ export default function App() {
         >
           {running ? "Analyzing…" : "Analyze"}
         </button>
+      </div>
+
+      <div className="depth-row">
+        {DEPTH_OPTIONS.map((opt, i) => (
+          <button
+            key={opt.label}
+            className={`depth-btn${depthIdx === i ? " depth-btn-active" : ""}`}
+            onClick={() => setDepthIdx(i)}
+            disabled={running}
+            title={opt.hint}
+          >
+            {opt.label}
+          </button>
+        ))}
       </div>
 
       {anyStepStarted && (

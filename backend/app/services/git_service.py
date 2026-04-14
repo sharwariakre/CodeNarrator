@@ -1,3 +1,7 @@
+import re
+import urllib.request
+import urllib.error
+import json
 from pathlib import Path
 from typing import Optional
 import shutil
@@ -9,6 +13,40 @@ from app.core.config import settings
 
 class GitCloneError(Exception):
     pass
+
+
+def _check_github_repo_size(repo_url: str) -> None:
+    """
+    Query the GitHub API for repo size and raise GitCloneError if it exceeds
+    settings.REPO_MAX_SIZE_MB. Only applies to github.com URLs.
+    Does nothing if REPO_MAX_SIZE_MB is 0 (disabled) or the URL is not GitHub.
+    """
+    if settings.REPO_MAX_SIZE_MB <= 0:
+        return
+
+    url_str = str(repo_url)
+    match = re.search(r"github\.com[/:]([^/]+)/([^/\s.]+?)(?:\.git)?$", url_str)
+    if not match:
+        return  # not a GitHub URL — skip check
+
+    owner, repo = match.group(1), match.group(2)
+    api_url = f"https://api.github.com/repos/{owner}/{repo}"
+
+    try:
+        req = urllib.request.Request(api_url, headers={"User-Agent": "CodeNarrator"})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        size_kb = data.get("size", 0)
+        size_mb = size_kb / 1024
+        if size_mb > settings.REPO_MAX_SIZE_MB:
+            raise GitCloneError(
+                f"Repository is too large ({size_mb:.0f} MB). "
+                f"Maximum supported size is {settings.REPO_MAX_SIZE_MB} MB."
+            )
+    except GitCloneError:
+        raise
+    except Exception:
+        pass  # API unreachable or rate-limited — allow clone to proceed
 
 
 def get_repo_local_path(repo_url: str) -> Path:
@@ -47,6 +85,7 @@ def clone_or_update_repo(repo_url: str, force_clean: bool = False) -> Path:
         shutil.rmtree(local_path)
 
     if not local_path.exists():
+        _check_github_repo_size(repo_url)
         try:
             Repo.clone_from(repo_url, local_path)
         except GitCommandError as e:

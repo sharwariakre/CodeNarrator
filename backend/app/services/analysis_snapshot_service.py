@@ -781,6 +781,10 @@ def _extract_imports_for_file(*, content: str, language: str) -> List[str]:
         return _extract_java_imports(content)
     if language == "go":
         return _extract_go_imports(content)
+    if language == "rust":
+        return _extract_rust_imports(content)
+    if language in {"cpp", "c"}:
+        return _extract_cpp_imports(content)
     return []
 
 
@@ -848,6 +852,47 @@ def _extract_javascript_imports(content: str) -> List[str]:
             if module and module not in seen:
                 imports.append(module)
                 seen.add(module)
+
+    return imports
+
+
+def _extract_rust_imports(content: str) -> List[str]:
+    imports: List[str] = []
+    seen: Set[str] = set()
+
+    # use crate::module, use super::module, use self::module, use external_crate::...
+    for match in re.finditer(r"^\s*use\s+([\w:]+)", content, re.MULTILINE):
+        module = match.group(1).strip().rstrip(":")
+        if module and module not in seen:
+            imports.append(module)
+            seen.add(module)
+
+    # mod submodule; (declares a local module file)
+    for match in re.finditer(r"^\s*mod\s+(\w+)\s*;", content, re.MULTILINE):
+        module = match.group(1).strip()
+        if module and module not in seen:
+            imports.append(module)
+            seen.add(module)
+
+    # extern crate name;
+    for match in re.finditer(r"^\s*extern\s+crate\s+(\w+)\s*;", content, re.MULTILINE):
+        module = match.group(1).strip()
+        if module and module not in seen:
+            imports.append(module)
+            seen.add(module)
+
+    return imports
+
+
+def _extract_cpp_imports(content: str) -> List[str]:
+    imports: List[str] = []
+    seen: Set[str] = set()
+
+    for match in re.finditer(r'^\s*#\s*include\s*[<"]([^>"]+)[>"]', content, re.MULTILINE):
+        module = match.group(1).strip()
+        if module and module not in seen:
+            imports.append(module)
+            seen.add(module)
 
     return imports
 
