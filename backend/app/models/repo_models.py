@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field, HttpUrl
 class IngestRepoRequest(BaseModel):
     repo_url: HttpUrl
     force_clean: bool = False
+    git_token: str | None = None  # optional PAT for private repos
 
 
 class IngestRepoResponse(BaseModel):

@@ -25,6 +25,57 @@ header h1 {
   font-size: 1rem;
 }
 
+/* Token row */
+.token-row {
+  display: flex;
+  gap: 8px;
+  width: 100%;
+  max-width: 680px;
+}
+
+.token-input {
+  flex: 1;
+  padding: 8px 14px;
+  font-size: 0.9rem;
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg);
+  color: var(--text-h);
+  outline: none;
+  transition: border-color 0.2s;
+}
+
+.token-input:focus {
+  border-color: var(--accent);
+}
+
+.token-input:disabled {
+  opacity: 0.6;
+}
+
+.token-toggle {
+  padding: 8px 14px;
+  font-size: 0.85rem;
+  font-weight: 500;
+  background: transparent;
+  color: var(--text);
+  border: 1.5px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.token-toggle:hover:not(:disabled) {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.token-toggle:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 /* Depth selector */
 .depth-row {
   display: flex;

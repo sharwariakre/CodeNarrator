@@ -44,6 +44,7 @@ async def ingest_repo(payload: IngestRepoRequest):
             clone_or_update_repo,
             repo_url=payload.repo_url,
             force_clean=payload.force_clean,
+            git_token=payload.git_token,
         )
     except GitCloneError as e:
         raise HTTPException(status_code=400, detail=str(e))

@@ -62,11 +62,11 @@ export interface ReportResponse {
   report_path: string;
 }
 
-export async function ingestRepo(repoUrl: string, forceClean = false): Promise<IngestResponse> {
+export async function ingestRepo(repoUrl: string, forceClean = false, gitToken?: string): Promise<IngestResponse> {
   const res = await fetch(`${BASE}/ingest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ repo_url: repoUrl, force_clean: forceClean }),
+    body: JSON.stringify({ repo_url: repoUrl, force_clean: forceClean, git_token: gitToken || null }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));

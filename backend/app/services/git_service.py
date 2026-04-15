@@ -74,20 +74,36 @@ def get_repo_local_path(repo_url: str) -> Path:
     return settings.REPO_BASE_DIR / slug
 
 
-def clone_or_update_repo(repo_url: str, force_clean: bool = False) -> Path:
+def _inject_token(repo_url: str, token: str) -> str:
+    """
+    Inject a personal access token into an HTTPS URL for authenticated cloning.
+    https://github.com/owner/repo  ->  https://<token>@github.com/owner/repo
+    Works for GitHub, GitLab, and Bitbucket HTTPS URLs.
+    """
+    url_str = str(repo_url)
+    for prefix in ("https://", "http://"):
+        if url_str.startswith(prefix):
+            return f"{prefix}{token}@{url_str[len(prefix):]}"
+    return repo_url  # SSH or unknown format — leave unchanged
+
+
+def clone_or_update_repo(repo_url: str, force_clean: bool = False, git_token: Optional[str] = None) -> Path:
     """
     Clone the repo if not present; otherwise pull latest.
     If force_clean is True, delete and re-clone.
+    If git_token is provided, it is injected into the clone URL for private repos.
     """
     local_path = get_repo_local_path(repo_url)
 
     if force_clean and local_path.exists():
         shutil.rmtree(local_path)
 
+    clone_url = _inject_token(repo_url, git_token) if git_token else str(repo_url)
+
     if not local_path.exists():
         _check_github_repo_size(repo_url)
         try:
-            Repo.clone_from(repo_url, local_path)
+            Repo.clone_from(clone_url, local_path)
         except GitCommandError as e:
             raise GitCloneError(f"Failed to clone repo: {e}") from e
     else:
@@ -95,9 +111,11 @@ def clone_or_update_repo(repo_url: str, force_clean: bool = False) -> Path:
         try:
             repo = Repo(local_path)
             origin = repo.remotes.origin
+            # Update remote URL in case token changed
+            if git_token:
+                origin.set_url(clone_url)
             origin.pull()
         except GitCommandError as e:
-            # Not fatal for MVP – we can ignore or re-clone
             raise GitCloneError(f"Failed to update repo: {e}") from e
 
     return local_path

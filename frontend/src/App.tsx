@@ -61,6 +61,8 @@ export default function App() {
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [depthIdx, setDepthIdx]     = useState(1); // default: Standard
   const [liveFile, setLiveFile]     = useState<string | null>(null);
+  const [token, setToken]           = useState("");
+  const [showToken, setShowToken]   = useState(false);
 
   function updateStep(id: string, patch: Partial<Step>) {
     setSteps((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
@@ -76,7 +78,7 @@ export default function App() {
     try {
       // 1. Ingest
       updateStep("ingest", { status: "running" });
-      const ingested = await ingestRepo(url.trim());
+      const ingested = await ingestRepo(url.trim(), false, token.trim() || undefined);
       updateStep("ingest", { status: "done", detail: ingested.local_path });
       const localPath = ingested.local_path;
 
@@ -147,7 +149,7 @@ export default function App() {
     <div className="app">
       <header>
         <h1>CodeNarrator</h1>
-        <p className="subtitle">Paste a GitHub URL — get an architecture report</p>
+        <p className="subtitle">Paste a GitHub, GitLab, or Bitbucket URL — get an architecture report</p>
       </header>
 
       <div className="input-row">
@@ -166,6 +168,26 @@ export default function App() {
           disabled={running || !url.trim()}
         >
           {running ? "Analyzing…" : "Analyze"}
+        </button>
+      </div>
+
+      <div className="token-row">
+        <input
+          className="token-input"
+          type={showToken ? "text" : "password"}
+          placeholder="Personal access token (optional, for private repos)"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          disabled={running}
+          autoComplete="off"
+        />
+        <button
+          className="token-toggle"
+          onClick={() => setShowToken((v) => !v)}
+          disabled={running}
+          type="button"
+        >
+          {showToken ? "Hide" : "Show"}
         </button>
       </div>
 
