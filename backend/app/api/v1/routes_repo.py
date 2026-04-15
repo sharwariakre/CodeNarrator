@@ -13,6 +13,7 @@ from app.models import (
     CachedStateResponse,
     GenerateReportRequest,
     GenerateReportResponse,
+    HistoryResponse,
     IngestRepoRequest,
     IngestRepoResponse,
     InterpretArchitectureRequest,
@@ -28,7 +29,7 @@ from app.services.analysis_snapshot_service import (
 from app.services.agentic_analysis_service import run_agentic_analysis_loop
 from app.services.ai_interpreter import interpret_architecture
 from app.services.report_generator import generate_html_report
-from app.services.analysis_state_store import save_state, load_state
+from app.services.analysis_state_store import save_state, load_state, list_history
 
 router = APIRouter(prefix="/repos", tags=["repos"])
 
@@ -174,6 +175,13 @@ async def stream_repo_snapshot_loop(payload: AnalysisLoopRequest):
 
     return StreamingResponse(generate(), media_type="text/event-stream",
                               headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@router.get("/history", response_model=HistoryResponse)
+async def get_analysis_history():
+    """Return metadata for all cached analyses, sorted newest first."""
+    entries = list_history(_resolve_cache_dir())
+    return HistoryResponse(entries=entries)
 
 
 @router.post("/state", response_model=CachedStateResponse)

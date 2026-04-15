@@ -190,6 +190,22 @@ export async function getCachedState(repoId: string, localPath: string): Promise
   return res.json();
 }
 
+export interface HistoryEntry {
+  repo_id: string;
+  repo_name: string;
+  saved_at: string;
+  confidence: number;
+  languages: string[];
+  file_count: number;
+}
+
+export async function getHistory(): Promise<HistoryEntry[]> {
+  const res = await fetch(`${BASE}/history`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.entries ?? [];
+}
+
 export async function fetchReportHtml(reportPath: string): Promise<string> {
   // The backend serves files from data/reports via /reports static mount (to be added)
   // For now, use the /report-file endpoint

@@ -6,8 +6,9 @@ import {
   interpretArchitecture,
   generateReport,
   fetchReportHtml,
+  getHistory,
 } from "./api";
-import type { AnalysisState } from "./api";
+import type { AnalysisState, HistoryEntry } from "./api";
 import "./App.css";
 
 type StepStatus = "idle" | "running" | "done" | "error";
@@ -63,6 +64,11 @@ export default function App() {
   const [liveFile, setLiveFile]     = useState<string | null>(null);
   const [token, setToken]           = useState("");
   const [showToken, setShowToken]   = useState(false);
+  const [history, setHistory]       = useState<HistoryEntry[]>([]);
+
+  useEffect(() => {
+    getHistory().then(setHistory).catch(() => {});
+  }, []);
 
   function updateStep(id: string, patch: Partial<Step>) {
     setSteps((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
@@ -131,6 +137,8 @@ export default function App() {
 
       const html = await fetchReportHtml(reportResp.report_path);
       setReportHtml(html);
+      // Refresh history so the new entry appears
+      getHistory().then(setHistory).catch(() => {});
     } catch (err: unknown) {
       setLiveFile(null);
       const msg = err instanceof Error ? err.message : String(err);
@@ -240,6 +248,25 @@ export default function App() {
             title="Architecture Report"
             sandbox="allow-scripts allow-same-origin"
           />
+        </div>
+      )}
+
+      {!reportHtml && !anyStepStarted && history.length > 0 && (
+        <div className="history-wrapper">
+          <div className="history-header">Previous analyses</div>
+          <div className="history-list">
+            {history.map((entry) => (
+              <div key={entry.repo_id} className="history-entry">
+                <span className="history-repo">{entry.repo_name}</span>
+                <span className="history-meta">
+                  {entry.languages.join(", ")} · {entry.file_count} files · {(entry.confidence * 100).toFixed(0)}% confidence
+                </span>
+                <span className="history-date">
+                  {new Date(entry.saved_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>

@@ -125,3 +125,16 @@ class GenerateReportRequest(BaseModel):
 
 class GenerateReportResponse(BaseModel):
     report_path: str
+
+
+class HistoryEntry(BaseModel):
+    repo_id: str
+    repo_name: str
+    saved_at: str
+    confidence: float
+    languages: list[str]
+    file_count: int
+
+
+class HistoryResponse(BaseModel):
+    entries: list[HistoryEntry]

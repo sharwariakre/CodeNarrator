@@ -267,3 +267,58 @@ header h1 {
   border: none;
   display: block;
 }
+
+/* History */
+.history-wrapper {
+  width: 100%;
+  max-width: 680px;
+  border: 1.5px solid var(--border);
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.history-header {
+  padding: 10px 18px;
+  background: var(--code-bg);
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--text);
+  border-bottom: 1px solid var(--border);
+}
+
+.history-list {
+  display: flex;
+  flex-direction: column;
+}
+
+.history-entry {
+  display: flex;
+  align-items: baseline;
+  gap: 12px;
+  padding: 10px 18px;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.9rem;
+}
+
+.history-entry:last-child {
+  border-bottom: none;
+}
+
+.history-repo {
+  font-weight: 600;
+  color: var(--text-h);
+  flex-shrink: 0;
+}
+
+.history-meta {
+  color: var(--text);
+  font-size: 0.82rem;
+  flex: 1;
+}
+
+.history-date {
+  color: var(--text);
+  font-size: 0.8rem;
+  flex-shrink: 0;
+  opacity: 0.7;
+}

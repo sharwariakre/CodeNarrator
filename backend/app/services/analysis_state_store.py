@@ -51,6 +51,36 @@ def load_state(repo_id: str, local_path: str, cache_dir: Path) -> Optional[Dict]
     return payload.get("final_state")
 
 
+def list_history(cache_dir: Path) -> list:
+    """
+    Return metadata for all cached analyses, sorted newest first.
+    Each entry: {repo_id, repo_name, saved_at, confidence, languages, file_count, report_path}
+    """
+    if not cache_dir.exists():
+        return []
+
+    entries = []
+    for cache_file in cache_dir.glob("*.json"):
+        try:
+            payload = json.loads(cache_file.read_text(encoding="utf-8"))
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        final_state = payload.get("final_state", {})
+        summary = final_state.get("current_summary", {})
+        entries.append({
+            "repo_id": payload.get("repo_id", ""),
+            "repo_name": summary.get("repo", payload.get("repo_id", "")),
+            "saved_at": payload.get("saved_at", ""),
+            "confidence": final_state.get("confidence", 0),
+            "languages": summary.get("languages", []),
+            "file_count": summary.get("file_count", 0),
+        })
+
+    entries.sort(key=lambda e: e["saved_at"], reverse=True)
+    return entries
+
+
 def _cache_path(cache_dir: Path, repo_id: str) -> Path:
     safe_name = repo_id.replace("/", "__").replace("\\", "__")
     return cache_dir / f"{safe_name}.json"
