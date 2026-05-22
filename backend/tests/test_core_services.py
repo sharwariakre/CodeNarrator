@@ -224,8 +224,13 @@ class TestExtractImportsForFile:
         result = _extract_imports_for_file(content='import "fmt"\n', language="go")
         assert "fmt" in result
 
-    def test_unsupported_language_returns_empty(self):
+    def test_dispatches_c(self):
+        # "c" now dispatches to _extract_cpp_imports (added in commit 3ca3a1b).
         result = _extract_imports_for_file(content="#include <stdio.h>", language="c")
+        assert "stdio.h" in result
+
+    def test_unknown_language_returns_empty(self):
+        result = _extract_imports_for_file(content="some content", language="unknown")
         assert result == []
 
 
