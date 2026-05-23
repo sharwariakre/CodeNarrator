@@ -199,9 +199,40 @@ def _render_html(payload: Dict) -> str:
       background: #fff;
     }}
     .legend {{
-      margin-top: 12px;
+      margin-top: 14px;
       color: var(--muted);
       font-size: 13px;
+    }}
+    .legend ul {{
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 6px 16px;
+    }}
+    .legend li {{
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }}
+    .legend strong {{
+      color: var(--text);
+    }}
+    .swatch {{
+      display: inline-block;
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }}
+    .swatch.solid {{
+      background: #0f766e;
+      box-shadow: 0 0 0 1px #6b7280;
+    }}
+    .swatch.dashed {{
+      background: #c4c8d0;
+      border: 1.5px dashed #6b7280;
     }}
     .component, .dep {{
       border-left: 4px solid var(--accent);
@@ -254,7 +285,14 @@ def _render_html(payload: Dict) -> str:
     <section class="panel">
       <h2>Dependency Graph</h2>
       <svg id="graph" width="100%" height="680"></svg>
-      <div class="legend">Node size = incoming internal dependencies. Color = cluster. Grey dashed = imported but not explored.</div>
+      <div class="legend">
+        <ul>
+          <li><span class="swatch solid"></span><span><strong>Solid node</strong> — explored by agent</span></li>
+          <li><span class="swatch dashed"></span><span><strong>Dashed node</strong> — referenced in imports but not explored</span></li>
+          <li><span><strong>Node size</strong> — number of files that import this file (in-degree)</span></li>
+          <li><span><strong>Node color</strong> — directory/cluster grouping</span></li>
+        </ul>
+      </div>
     </section>
 
     <section class="panel">
@@ -388,15 +426,15 @@ def _render_html(payload: Dict) -> str:
         .on("drag", dragged)
         .on("end", dragended))
       .on("mousemove", (event, d) => {{
+        const body = d.cluster === "unvisited"
+          ? `<div><em>Referenced in imports but not explored by the agent.</em></div>`
+          : `<div>role: ${{d.role_hint}}</div>
+             <div>imports_count: ${{d.imports_count}}</div>
+             <div>imports: ${{(d.imported_modules || []).join(", ") || "none"}}</div>`;
         tooltip.style("opacity", 1)
           .style("left", (event.pageX + 12) + "px")
           .style("top", (event.pageY + 12) + "px")
-          .html(`
-            <div><strong>${{d.id}}</strong></div>
-            <div>role: ${{d.role_hint}}</div>
-            <div>imports_count: ${{d.imports_count}}</div>
-            <div>imports: ${{(d.imported_modules || []).join(", ") || "none"}}</div>
-          `);
+          .html(`<div><strong>${{d.id}}</strong></div>${{body}}`);
       }})
       .on("mouseleave", () => tooltip.style("opacity", 0));
 

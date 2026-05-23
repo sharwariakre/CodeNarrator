@@ -21,6 +21,8 @@ from app.services.agentic_analysis_service import (
     _build_language_guidance,
     _is_noise_file,
 )
+from app.services import report_generator
+from app.services.report_generator import generate_html_report
 
 
 # ---------------------------------------------------------------------------
@@ -673,3 +675,72 @@ class TestBuildLanguageGuidance:
             assert "Python entry points" in out
             assert "General JS/TS" in out
             assert "Go entry points" in out
+
+
+# ---------------------------------------------------------------------------
+# generate_html_report — smoke test for the legend and phantom tooltip
+# ---------------------------------------------------------------------------
+
+class TestGenerateHtmlReport:
+    def _make_final_state(self, repo: Path) -> dict:
+        return {
+            "repo_id": "test",
+            "explored_files": ["a.py"],
+            "candidate_files": [],
+            "inspected_facts": [
+                {
+                    "file_path": "a.py",
+                    "language": "python",
+                    "line_count_bucket": "small",
+                    "directory": ".",
+                    "role_hint": "module",
+                    "imports_found": 1,
+                    "imported_modules": ["b"],
+                }
+            ],
+            "dependency_edges": [{"source": "a.py", "imports": ["./b"]}],
+            "dependency_graph_summary": {},
+            "package_roots": ["."],
+            "unknowns": [],
+            "current_summary": {
+                "repo": "test",
+                "local_path": str(repo),
+                "repo_type": "library",
+                "file_count": 2,
+                "languages": ["python"],
+                "language_breakdown": {"python": 2},
+                "top_level_dirs": [],
+                "entry_points": [],
+                "inspected_languages": ["python"],
+                "inspected_role_hints": ["module"],
+            },
+            "confidence": 0.5,
+            "no_progress_steps": 0,
+            "stop_reason": None,
+        }
+
+    def test_legend_and_phantom_tooltip_present(self, monkeypatch):
+        # Skip the network fetch for D3; the report still renders with a CDN tag fallback.
+        monkeypatch.setattr(report_generator, "_D3_CACHE", "// stubbed", raising=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            (repo / "a.py").write_text("from . import b\n")
+            (repo / "b.py").write_text("")
+
+            output = repo / "report.html"
+            generate_html_report(self._make_final_state(repo), None, output)
+            content = output.read_text(encoding="utf-8")
+
+            # Structured legend
+            assert "Solid node" in content
+            assert "explored by agent" in content
+            assert "Dashed node" in content
+            assert "referenced in imports but not explored" in content
+            assert "Node size" in content
+            assert "in-degree" in content
+            assert "Node color" in content
+
+            # Phantom node tooltip branch
+            assert 'd.cluster === "unvisited"' in content
+            assert "Referenced in imports but not explored by the agent." in content
