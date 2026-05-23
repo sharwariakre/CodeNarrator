@@ -844,6 +844,10 @@ def _extract_javascript_imports(content: str) -> List[str]:
         r'import\s+[^;\n]*?\sfrom\s+["\']([^"\']+)["\']',
         r'import\s+["\']([^"\']+)["\']',
         r'require\(\s*["\']([^"\']+)["\']\s*\)',
+        # Re-exports: export { X } from './foo', export * from './foo', export { X as Y } from './foo'
+        r'export\s+(?:\*|{[^}]*})\s+from\s+["\']([^"\']+)["\']',
+        # Dynamic imports: import('./foo'), import('./foo').then(...)
+        r'import\s*\(\s*["\']([^"\']+)["\']\s*\)',
     ]
 
     for pattern in patterns:
@@ -1017,6 +1021,10 @@ def _cluster_key(module: str) -> str:
     return module
 
 
+_JS_EXTENSIONS = {".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"}
+_C_EXTENSIONS = {".c", ".cpp", ".h", ".hpp"}
+
+
 def _resolve_internal_import(
     *,
     repo_path: Path,
@@ -1027,19 +1035,43 @@ def _resolve_internal_import(
 ) -> str | None:
     source_abs = (repo_path / source_file).resolve()
     source_dir = source_abs.parent
+    source_suffix = Path(source_file).suffix.lower()
 
+    # Dispatch by the source file's language. This avoids cross-language false
+    # positives (e.g. a Go "./pkg" import going through the JS resolver, or a
+    # Java "com.example" import matching a Python "com" package).
+    if source_suffix in _JS_EXTENSIONS:
+        if _is_js_relative_import(import_specifier):
+            resolved = _resolve_js_relative_import(repo_path, source_dir, import_specifier)
+            return str(resolved.relative_to(repo_path)) if resolved else None
+        return None  # bare JS imports like 'react' are external
+
+    if source_suffix == ".py":
+        if _is_python_relative_import(import_specifier):
+            resolved = _resolve_python_relative_import(repo_path, source_dir, import_specifier)
+            return str(resolved.relative_to(repo_path)) if resolved else None
+        if _should_attempt_absolute_python_resolution(import_specifier, package_roots, scanned_files):
+            resolved = _resolve_absolute_import(import_specifier, package_roots, scanned_files)
+            if resolved is not None:
+                return resolved
+        return None
+
+    if source_suffix == ".java":
+        return _resolve_java_import(import_specifier, scanned_files)
+    if source_suffix == ".go":
+        return _resolve_go_import(repo_path, source_dir, import_specifier, scanned_files)
+    if source_suffix == ".rs":
+        return _resolve_rust_import(repo_path, source_dir, import_specifier, scanned_files)
+    if source_suffix in _C_EXTENSIONS:
+        return _resolve_c_import(repo_path, source_dir, import_specifier, scanned_files)
+
+    # Unknown source extension — fall back to shape-based heuristics for safety.
     if _is_js_relative_import(import_specifier):
         resolved = _resolve_js_relative_import(repo_path, source_dir, import_specifier)
         return str(resolved.relative_to(repo_path)) if resolved else None
-
     if _is_python_relative_import(import_specifier):
         resolved = _resolve_python_relative_import(repo_path, source_dir, import_specifier)
         return str(resolved.relative_to(repo_path)) if resolved else None
-
-    if _should_attempt_absolute_python_resolution(import_specifier, package_roots, scanned_files):
-        resolved = _resolve_absolute_import(import_specifier, package_roots, scanned_files)
-        if resolved is not None:
-            return resolved
 
     return None
 
@@ -1072,6 +1104,168 @@ def _resolve_python_relative_import(repo_path: Path, source_dir: Path, import_sp
 
     candidate_base = target_dir / module.replace(".", "/") if module else target_dir
     return _resolve_candidate_path(repo_path, candidate_base, [".py"])
+
+
+# Common roots Java sources live under in Maven/Gradle layouts.
+_JAVA_SOURCE_ROOTS = ("", "src/main/java/", "src/", "java/")
+
+
+def _resolve_java_import(import_specifier: str, scanned_files: Set[str]) -> str | None:
+    """
+    Map "com.example.Foo" → "com/example/Foo.java" and try common Java source
+    roots. For static imports like "com.example.Foo.method", drop the trailing
+    member segment and retry as a class import.
+    """
+    def try_resolve(class_path: str) -> str | None:
+        rel = class_path.replace(".", "/") + ".java"
+        for root in _JAVA_SOURCE_ROOTS:
+            candidate = f"{root}{rel}"
+            if candidate in scanned_files:
+                return candidate
+        return None
+
+    resolved = try_resolve(import_specifier)
+    if resolved is not None:
+        return resolved
+    if "." in import_specifier:
+        return try_resolve(import_specifier.rsplit(".", 1)[0])
+    return None
+
+
+def _resolve_go_import(
+    repo_path: Path,
+    source_dir: Path,
+    import_specifier: str,
+    scanned_files: Set[str],
+) -> str | None:
+    """
+    Resolve a Go import to a representative .go file in the target package directory.
+
+    - "./local" / "../local" → directory relative to source_dir
+    - "github.com/foo/bar/pkg" → strip module prefix heuristically by trying
+      progressively-longer trailing suffixes of the import path against scanned
+      package directories. Handles both repo-rooted ("pkg/foo") and module-pathed
+      ("github.com/user/proj/pkg/foo") layouts.
+    """
+    if import_specifier.startswith("./") or import_specifier.startswith("../"):
+        try:
+            target_dir = (source_dir / import_specifier).resolve().relative_to(repo_path).as_posix()
+        except ValueError:
+            return None
+        return _first_file_in_dir(target_dir, scanned_files, ".go")
+
+    parts = import_specifier.split("/")
+    for i in range(len(parts)):
+        candidate_dir = "/".join(parts[i:])
+        resolved = _first_file_in_dir(candidate_dir, scanned_files, ".go")
+        if resolved is not None:
+            return resolved
+    return None
+
+
+def _first_file_in_dir(directory: str, scanned_files: Set[str], extension: str) -> str | None:
+    """Return the alphabetically-first file directly inside `directory` with the given extension."""
+    prefix = (directory.rstrip("/") + "/") if directory else ""
+    candidates = sorted(
+        f for f in scanned_files
+        if f.endswith(extension)
+        and f.startswith(prefix)
+        and "/" not in f[len(prefix):]
+    )
+    return candidates[0] if candidates else None
+
+
+def _resolve_rust_import(
+    repo_path: Path,
+    source_dir: Path,
+    import_specifier: str,
+    scanned_files: Set[str],
+) -> str | None:
+    """
+    Resolve a Rust import:
+    - "crate::foo::bar" → {crate_dir}/foo/bar.rs or {crate_dir}/foo/bar/mod.rs;
+       falls back to {crate_dir}/foo.rs if `bar` is an item inside `foo`.
+    - "foo" (bare ident from `mod foo;` or `extern crate foo;`) →
+       {source_dir}/foo.rs or {source_dir}/foo/mod.rs. External crates won't
+       match locally and return None.
+    """
+    if import_specifier.startswith("crate::"):
+        crate_root = _detect_rust_crate_root(scanned_files)
+        if crate_root is None:
+            return None
+        crate_dir = posixpath.dirname(crate_root)
+        path_parts = import_specifier[len("crate::"):].split("::")
+        if not path_parts or not all(path_parts):
+            return None
+
+        prefix = (crate_dir + "/") if crate_dir else ""
+        rel_module = "/".join(path_parts)
+        for candidate in (f"{prefix}{rel_module}.rs", f"{prefix}{rel_module}/mod.rs"):
+            if candidate in scanned_files:
+                return candidate
+
+        # The final segment may be an item (function/struct) inside the parent module.
+        if len(path_parts) > 1:
+            parent = "/".join(path_parts[:-1])
+            for candidate in (f"{prefix}{parent}.rs", f"{prefix}{parent}/mod.rs"):
+                if candidate in scanned_files:
+                    return candidate
+        return None
+
+    if "::" not in import_specifier and import_specifier.isidentifier():
+        try:
+            source_rel = source_dir.relative_to(repo_path).as_posix()
+        except ValueError:
+            return None
+        prefix = (source_rel + "/") if source_rel else ""
+        for candidate in (f"{prefix}{import_specifier}.rs", f"{prefix}{import_specifier}/mod.rs"):
+            if candidate in scanned_files:
+                return candidate
+    return None
+
+
+def _detect_rust_crate_root(scanned_files: Set[str]) -> str | None:
+    """Return src/lib.rs or src/main.rs if either is in scanned_files."""
+    for candidate in ("src/lib.rs", "src/main.rs"):
+        if candidate in scanned_files:
+            return candidate
+    return None
+
+
+# TODO: the C extractor strips delimiters so we cannot distinguish
+# #include <stdio.h> (system) from #include "stdio.h" (local). In
+# practice system headers won't be in scanned_files so they return
+# None correctly. Edge case: a local file shadowing a stdlib name
+# (e.g. string.h) would incorrectly resolve. Fix requires preserving
+# delimiters in _extract_cpp_imports.
+def _resolve_c_import(
+    repo_path: Path,
+    source_dir: Path,
+    import_specifier: str,
+    scanned_files: Set[str],
+) -> str | None:
+    """
+    Resolve a C/C++ #include header.
+
+    The extractor strips the <>/"" delimiter, so we attempt resolution against
+    both the source file's directory and the repo root. System headers like
+    <stdio.h> won't appear in scanned_files and return None — which gives the
+    same effective behavior as recognising them as external.
+    """
+    try:
+        source_rel = source_dir.relative_to(repo_path).as_posix()
+    except ValueError:
+        return None
+
+    prefix = (source_rel + "/") if source_rel else ""
+    candidate = f"{prefix}{import_specifier}"
+    if candidate in scanned_files:
+        return candidate
+
+    if import_specifier in scanned_files:
+        return import_specifier
+
+    return None
 
 
 def _detect_python_package_roots(repo_path: Path, scanned_files: List[str]) -> List[str]:
