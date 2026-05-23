@@ -4,6 +4,7 @@ from pydantic import BaseModel, Field, HttpUrl
 class IngestRepoRequest(BaseModel):
     repo_url: HttpUrl
     force_clean: bool = False
+    git_token: str | None = None  # optional PAT for private repos
 
 
 class IngestRepoResponse(BaseModel):
@@ -124,3 +125,16 @@ class GenerateReportRequest(BaseModel):
 
 class GenerateReportResponse(BaseModel):
     report_path: str
+
+
+class HistoryEntry(BaseModel):
+    repo_id: str
+    repo_name: str
+    saved_at: str
+    confidence: float
+    languages: list[str]
+    file_count: int
+
+
+class HistoryResponse(BaseModel):
+    entries: list[HistoryEntry]

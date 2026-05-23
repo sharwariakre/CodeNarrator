@@ -6,8 +6,9 @@ import {
   interpretArchitecture,
   generateReport,
   fetchReportHtml,
+  getHistory,
 } from "./api";
-import type { AnalysisState } from "./api";
+import type { AnalysisState, HistoryEntry } from "./api";
 import "./App.css";
 
 type StepStatus = "idle" | "running" | "done" | "error";
@@ -61,6 +62,13 @@ export default function App() {
   const [globalError, setGlobalError] = useState<string | null>(null);
   const [depthIdx, setDepthIdx]     = useState(1); // default: Standard
   const [liveFile, setLiveFile]     = useState<string | null>(null);
+  const [token, setToken]           = useState("");
+  const [showToken, setShowToken]   = useState(false);
+  const [history, setHistory]       = useState<HistoryEntry[]>([]);
+
+  useEffect(() => {
+    getHistory().then(setHistory).catch(() => {});
+  }, []);
 
   function updateStep(id: string, patch: Partial<Step>) {
     setSteps((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
@@ -76,7 +84,7 @@ export default function App() {
     try {
       // 1. Ingest
       updateStep("ingest", { status: "running" });
-      const ingested = await ingestRepo(url.trim());
+      const ingested = await ingestRepo(url.trim(), false, token.trim() || undefined);
       updateStep("ingest", { status: "done", detail: ingested.local_path });
       const localPath = ingested.local_path;
 
@@ -129,6 +137,8 @@ export default function App() {
 
       const html = await fetchReportHtml(reportResp.report_path);
       setReportHtml(html);
+      // Refresh history so the new entry appears
+      getHistory().then(setHistory).catch(() => {});
     } catch (err: unknown) {
       setLiveFile(null);
       const msg = err instanceof Error ? err.message : String(err);
@@ -147,7 +157,7 @@ export default function App() {
     <div className="app">
       <header>
         <h1>CodeNarrator</h1>
-        <p className="subtitle">Paste a GitHub URL — get an architecture report</p>
+        <p className="subtitle">Paste a GitHub, GitLab, or Bitbucket URL — get an architecture report</p>
       </header>
 
       <div className="input-row">
@@ -166,6 +176,26 @@ export default function App() {
           disabled={running || !url.trim()}
         >
           {running ? "Analyzing…" : "Analyze"}
+        </button>
+      </div>
+
+      <div className="token-row">
+        <input
+          className="token-input"
+          type={showToken ? "text" : "password"}
+          placeholder="Personal access token (optional, for private repos)"
+          value={token}
+          onChange={(e) => setToken(e.target.value)}
+          disabled={running}
+          autoComplete="off"
+        />
+        <button
+          className="token-toggle"
+          onClick={() => setShowToken((v) => !v)}
+          disabled={running}
+          type="button"
+        >
+          {showToken ? "Hide" : "Show"}
         </button>
       </div>
 
@@ -218,6 +248,25 @@ export default function App() {
             title="Architecture Report"
             sandbox="allow-scripts allow-same-origin"
           />
+        </div>
+      )}
+
+      {!reportHtml && !anyStepStarted && history.length > 0 && (
+        <div className="history-wrapper">
+          <div className="history-header">Previous analyses</div>
+          <div className="history-list">
+            {history.map((entry) => (
+              <div key={entry.repo_id} className="history-entry">
+                <span className="history-repo">{entry.repo_name}</span>
+                <span className="history-meta">
+                  {entry.languages.join(", ")} · {entry.file_count} files · {(entry.confidence * 100).toFixed(0)}% confidence
+                </span>
+                <span className="history-date">
+                  {new Date(entry.saved_at).toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}
+                </span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </div>

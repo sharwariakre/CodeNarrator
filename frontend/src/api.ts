@@ -62,11 +62,11 @@ export interface ReportResponse {
   report_path: string;
 }
 
-export async function ingestRepo(repoUrl: string, forceClean = false): Promise<IngestResponse> {
+export async function ingestRepo(repoUrl: string, forceClean = false, gitToken?: string): Promise<IngestResponse> {
   const res = await fetch(`${BASE}/ingest`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ repo_url: repoUrl, force_clean: forceClean }),
+    body: JSON.stringify({ repo_url: repoUrl, force_clean: forceClean, git_token: gitToken || null }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
@@ -188,6 +188,22 @@ export async function getCachedState(repoId: string, localPath: string): Promise
   });
   if (!res.ok) return { repo_id: repoId, found: false, final_state: null };
   return res.json();
+}
+
+export interface HistoryEntry {
+  repo_id: string;
+  repo_name: string;
+  saved_at: string;
+  confidence: number;
+  languages: string[];
+  file_count: number;
+}
+
+export async function getHistory(): Promise<HistoryEntry[]> {
+  const res = await fetch(`${BASE}/history`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return data.entries ?? [];
 }
 
 export async function fetchReportHtml(reportPath: string): Promise<string> {

@@ -8,6 +8,8 @@ from .repo_models import (
     DependencyEdge,
     GenerateReportRequest,
     GenerateReportResponse,
+    HistoryEntry,
+    HistoryResponse,
     IngestRepoRequest,
     IngestRepoResponse,
     InterpretArchitectureRequest,
