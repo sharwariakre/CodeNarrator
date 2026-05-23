@@ -333,6 +333,187 @@ class TestResolveInternalImport:
         )
         assert result is None
 
+    # ---- Java ----
+
+    def test_java_maven_layout(self):
+        repo = self._make_repo({
+            "src/main/java/com/example/Foo.java": "",
+            "src/main/java/com/example/Bar.java": "",
+        })
+        scanned = {"src/main/java/com/example/Foo.java", "src/main/java/com/example/Bar.java"}
+        result = _resolve_internal_import(
+            repo_path=repo,
+            source_file="src/main/java/com/example/Foo.java",
+            import_specifier="com.example.Bar",
+            package_roots=[],
+            scanned_files=scanned,
+        )
+        assert result == "src/main/java/com/example/Bar.java"
+
+    def test_java_static_import_drops_member(self):
+        repo = self._make_repo({
+            "com/example/Foo.java": "",
+            "com/example/Bar.java": "",
+        })
+        scanned = {"com/example/Foo.java", "com/example/Bar.java"}
+        result = _resolve_internal_import(
+            repo_path=repo,
+            source_file="com/example/Bar.java",
+            import_specifier="com.example.Foo.someMethod",
+            package_roots=[],
+            scanned_files=scanned,
+        )
+        assert result == "com/example/Foo.java"
+
+    def test_java_external_returns_none(self):
+        repo = self._make_repo({"src/Foo.java": ""})
+        result = _resolve_internal_import(
+            repo_path=repo,
+            source_file="src/Foo.java",
+            import_specifier="java.util.List",
+            package_roots=[],
+            scanned_files={"src/Foo.java"},
+        )
+        assert result is None
+
+    # ---- Go ----
+
+    def test_go_relative_import(self):
+        repo = self._make_repo({
+            "main.go": "",
+            "pkg/util.go": "",
+        })
+        result = _resolve_internal_import(
+            repo_path=repo,
+            source_file="main.go",
+            import_specifier="./pkg",
+            package_roots=[],
+            scanned_files={"main.go", "pkg/util.go"},
+        )
+        assert result == "pkg/util.go"
+
+    def test_go_module_path_suffix_match(self):
+        repo = self._make_repo({
+            "cmd/server/main.go": "",
+            "internal/auth/auth.go": "",
+        })
+        result = _resolve_internal_import(
+            repo_path=repo,
+            source_file="cmd/server/main.go",
+            import_specifier="github.com/user/project/internal/auth",
+            package_roots=[],
+            scanned_files={"cmd/server/main.go", "internal/auth/auth.go"},
+        )
+        assert result == "internal/auth/auth.go"
+
+    def test_go_external_returns_none(self):
+        repo = self._make_repo({"main.go": ""})
+        result = _resolve_internal_import(
+            repo_path=repo,
+            source_file="main.go",
+            import_specifier="fmt",
+            package_roots=[],
+            scanned_files={"main.go"},
+        )
+        assert result is None
+
+    # ---- Rust ----
+
+    def test_rust_use_crate_path(self):
+        repo = self._make_repo({
+            "src/lib.rs": "",
+            "src/util.rs": "",
+        })
+        result = _resolve_internal_import(
+            repo_path=repo,
+            source_file="src/lib.rs",
+            import_specifier="crate::util",
+            package_roots=[],
+            scanned_files={"src/lib.rs", "src/util.rs"},
+        )
+        assert result == "src/util.rs"
+
+    def test_rust_use_crate_item_falls_back_to_module(self):
+        # crate::util::helper — helper is an item inside util.rs, not its own module.
+        repo = self._make_repo({
+            "src/lib.rs": "",
+            "src/util.rs": "",
+        })
+        result = _resolve_internal_import(
+            repo_path=repo,
+            source_file="src/lib.rs",
+            import_specifier="crate::util::helper",
+            package_roots=[],
+            scanned_files={"src/lib.rs", "src/util.rs"},
+        )
+        assert result == "src/util.rs"
+
+    def test_rust_mod_declaration(self):
+        repo = self._make_repo({
+            "src/main.rs": "",
+            "src/handlers.rs": "",
+        })
+        result = _resolve_internal_import(
+            repo_path=repo,
+            source_file="src/main.rs",
+            import_specifier="handlers",
+            package_roots=[],
+            scanned_files={"src/main.rs", "src/handlers.rs"},
+        )
+        assert result == "src/handlers.rs"
+
+    def test_rust_extern_crate_returns_none(self):
+        repo = self._make_repo({"src/lib.rs": ""})
+        result = _resolve_internal_import(
+            repo_path=repo,
+            source_file="src/lib.rs",
+            import_specifier="serde",
+            package_roots=[],
+            scanned_files={"src/lib.rs"},
+        )
+        assert result is None
+
+    # ---- C / C++ ----
+
+    def test_c_quoted_include_same_dir(self):
+        repo = self._make_repo({
+            "src/main.c": "",
+            "src/utils.h": "",
+        })
+        result = _resolve_internal_import(
+            repo_path=repo,
+            source_file="src/main.c",
+            import_specifier="utils.h",
+            package_roots=[],
+            scanned_files={"src/main.c", "src/utils.h"},
+        )
+        assert result == "src/utils.h"
+
+    def test_c_quoted_include_project_root(self):
+        repo = self._make_repo({
+            "src/main.c": "",
+            "config.h": "",
+        })
+        result = _resolve_internal_import(
+            repo_path=repo,
+            source_file="src/main.c",
+            import_specifier="config.h",
+            package_roots=[],
+            scanned_files={"src/main.c", "config.h"},
+        )
+        assert result == "config.h"
+
+    def test_c_system_header_returns_none(self):
+        repo = self._make_repo({"src/main.c": ""})
+        result = _resolve_internal_import(
+            repo_path=repo,
+            source_file="src/main.c",
+            import_specifier="stdio.h",
+            package_roots=[],
+            scanned_files={"src/main.c"},
+        )
+        assert result is None
+
 
 # ---------------------------------------------------------------------------
 # _compute_dependency_graph_summary
