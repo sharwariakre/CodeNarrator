@@ -139,6 +139,26 @@ class TestExtractJavaScriptImports:
     def test_empty_content(self):
         assert _extract_javascript_imports("") == []
 
+    def test_reexport_named(self):
+        result = _extract_javascript_imports("export { Button } from './Button';")
+        assert "./Button" in result
+
+    def test_reexport_star(self):
+        result = _extract_javascript_imports("export * from './utils';")
+        assert "./utils" in result
+
+    def test_reexport_aliased(self):
+        result = _extract_javascript_imports("export { Foo as Bar } from './foo';")
+        assert "./foo" in result
+
+    def test_dynamic_import(self):
+        result = _extract_javascript_imports("const m = import('./lazy');")
+        assert "./lazy" in result
+
+    def test_dynamic_import_chained(self):
+        result = _extract_javascript_imports("import('./lazy').then(m => m.default);")
+        assert "./lazy" in result
+
 
 # ---------------------------------------------------------------------------
 # Java import extraction
@@ -225,7 +245,6 @@ class TestExtractImportsForFile:
         assert "fmt" in result
 
     def test_dispatches_c(self):
-        # "c" now dispatches to _extract_cpp_imports (added in commit 3ca3a1b).
         result = _extract_imports_for_file(content="#include <stdio.h>", language="c")
         assert "stdio.h" in result
 

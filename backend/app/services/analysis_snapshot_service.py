@@ -844,6 +844,10 @@ def _extract_javascript_imports(content: str) -> List[str]:
         r'import\s+[^;\n]*?\sfrom\s+["\']([^"\']+)["\']',
         r'import\s+["\']([^"\']+)["\']',
         r'require\(\s*["\']([^"\']+)["\']\s*\)',
+        # Re-exports: export { X } from './foo', export * from './foo', export { X as Y } from './foo'
+        r'export\s+(?:\*|{[^}]*})\s+from\s+["\']([^"\']+)["\']',
+        # Dynamic imports: import('./foo'), import('./foo').then(...)
+        r'import\s*\(\s*["\']([^"\']+)["\']\s*\)',
     ]
 
     for pattern in patterns:
