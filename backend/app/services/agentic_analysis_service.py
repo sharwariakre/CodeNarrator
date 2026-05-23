@@ -386,7 +386,95 @@ def _build_system_message(state: Dict) -> Dict:
         f"5. Only call stop_analysis after you have read at least {min_files} files AND "
         f"have a clear picture of the overall architecture.\n"
     )
+    repo_path = Path(summary["local_path"])
+    content += _build_language_guidance(summary["languages"], cached_files, repo_path)
     return {"role": "system", "content": content}
+
+
+def _build_language_guidance(languages: List[str], files: List[str], repo_path: Path) -> str:
+    """
+    Return a language-specific guidance block to append to the system prompt.
+    Each language gets 3-5 lines; framework signals (Next.js, Vite, package.json
+    entry) further refine the JS/TS block. Returns "" when no recognized
+    language is present.
+    """
+    blocks: List[str] = []
+    file_set = set(files)
+
+    if "python" in languages:
+        blocks.append(
+            "Python entry points to prioritize: app.py, main.py, manage.py, "
+            "wsgi.py, asgi.py, __init__.py in the top-level package, "
+            "settings.py, urls.py (Django), config.py. Follow import chains "
+            "from these outward."
+        )
+
+    if "typescript" in languages or "javascript" in languages:
+        js_lines: List[str] = []
+        if "next.config.js" in file_set or "next.config.ts" in file_set:
+            js_lines.append(
+                "Next.js detected — prioritize app/, pages/, middleware.ts, "
+                "layout.tsx, page.tsx files."
+            )
+        if "vite.config.ts" in file_set or "vite.config.js" in file_set:
+            js_lines.append(
+                "Vite detected — prioritize src/main.tsx or src/main.ts as "
+                "entry point, then src/App.tsx."
+            )
+        pkg_entry = _read_package_json_entry(repo_path)
+        if pkg_entry:
+            js_lines.append(f"package.json entry: {pkg_entry}")
+        js_lines.append(
+            "General JS/TS: prioritize index.ts, App.tsx, main.ts, router "
+            "files, and any file named index.ts inside a directory (barrel "
+            "files reveal the public API of that module)."
+        )
+        blocks.append("\n".join(js_lines))
+
+    if "java" in languages:
+        blocks.append(
+            "Java entry points: Main.java, Application.java (Spring Boot), "
+            "files with public static void main, *Controller.java (routing "
+            "layer), *Service.java (business logic layer)."
+        )
+
+    if "go" in languages:
+        blocks.append(
+            "Go entry points: main.go, cmd/*/main.go. Follow from main() "
+            "outward through package imports."
+        )
+
+    if "rust" in languages:
+        blocks.append(
+            "Rust entry points: src/main.rs, src/lib.rs. mod declarations in "
+            "these files define the module tree — follow mod statements first."
+        )
+
+    if not blocks:
+        return ""
+    return "\nLanguage-specific guidance:\n" + "\n\n".join(blocks) + "\n"
+
+
+def _read_package_json_entry(repo_path: Path) -> Optional[str]:
+    """
+    Return the 'main' (preferred) or 'module' field from package.json at the
+    repo root, or None if absent / unparseable. Defensive — any error returns
+    None silently rather than poisoning the prompt build.
+    """
+    pkg = repo_path / "package.json"
+    if not pkg.is_file():
+        return None
+    try:
+        data = json.loads(pkg.read_text(encoding="utf-8", errors="ignore"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    for key in ("main", "module"):
+        value = data.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 # ---------------------------------------------------------------------------

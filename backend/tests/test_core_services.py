@@ -17,7 +17,10 @@ from app.services.analysis_snapshot_service import (
     _extract_python_imports,
     _resolve_internal_import,
 )
-from app.services.agentic_analysis_service import _is_noise_file
+from app.services.agentic_analysis_service import (
+    _build_language_guidance,
+    _is_noise_file,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -578,3 +581,95 @@ class TestComputeDependencyGraphSummary:
             state = self._make_state(edges, repo)
             result = _compute_dependency_graph_summary(state)
             assert len(result["internal_edges"]) <= 500
+
+
+# ---------------------------------------------------------------------------
+# _build_language_guidance
+# ---------------------------------------------------------------------------
+
+class TestBuildLanguageGuidance:
+    def test_empty_when_no_recognized_languages(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            assert _build_language_guidance([], [], Path(tmp)) == ""
+            assert _build_language_guidance(["cobol"], [], Path(tmp)) == ""
+
+    def test_python_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = _build_language_guidance(["python"], [], Path(tmp))
+            assert "Python entry points" in out
+            assert "manage.py" in out
+            assert "urls.py" in out
+
+    def test_javascript_general_when_no_framework(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = _build_language_guidance(["javascript"], ["src/index.js"], Path(tmp))
+            assert "General JS/TS" in out
+            assert "Next.js" not in out
+            assert "Vite" not in out
+
+    def test_typescript_picks_up_next_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = _build_language_guidance(
+                ["typescript"], ["next.config.ts", "app/page.tsx"], Path(tmp)
+            )
+            assert "Next.js detected" in out
+            assert "app/" in out
+
+    def test_typescript_picks_up_vite_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = _build_language_guidance(
+                ["typescript"], ["vite.config.ts", "src/main.tsx"], Path(tmp)
+            )
+            assert "Vite detected" in out
+            assert "src/main.tsx" in out
+
+    def test_reads_package_json_main_field(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "package.json").write_text('{"main": "./dist/index.js"}')
+            out = _build_language_guidance(["javascript"], [], repo)
+            assert "./dist/index.js" in out
+
+    def test_falls_back_to_module_when_main_absent(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "package.json").write_text('{"module": "./esm/index.mjs"}')
+            out = _build_language_guidance(["javascript"], [], repo)
+            assert "./esm/index.mjs" in out
+
+    def test_malformed_package_json_does_not_raise(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "package.json").write_text("{ not valid json")
+            out = _build_language_guidance(["javascript"], [], repo)
+            # Should still produce general JS/TS guidance, just no entry hint.
+            assert "General JS/TS" in out
+            assert "package.json entry" not in out
+
+    def test_java_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = _build_language_guidance(["java"], [], Path(tmp))
+            assert "Java entry points" in out
+            assert "Application.java" in out
+
+    def test_go_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = _build_language_guidance(["go"], [], Path(tmp))
+            assert "Go entry points" in out
+            assert "main.go" in out
+
+    def test_rust_block(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = _build_language_guidance(["rust"], [], Path(tmp))
+            assert "Rust entry points" in out
+            assert "src/main.rs" in out
+            assert "mod declarations" in out
+
+    def test_multiple_languages_concatenated(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            out = _build_language_guidance(
+                ["python", "typescript", "go"], ["src/index.ts"], Path(tmp)
+            )
+            assert "Python entry points" in out
+            assert "General JS/TS" in out
+            assert "Go entry points" in out
