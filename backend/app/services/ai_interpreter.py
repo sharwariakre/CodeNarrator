@@ -15,13 +15,19 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = settings.OLLAMA_MODEL
 
 
-def interpret_architecture(analysis_state: Dict) -> Optional[Dict]:
+def interpret_architecture(analysis_state: Dict) -> Dict:
     """
-    Optional AI interpretation for architecture understanding.
-    Returns None on any failure.
+    AI-assisted interpretation with deterministic fallbacks.
+
+    Always returns a dict so the report has something to render. Tries the AI
+    path first; on timeout, parse failure, or validation producing no usable
+    key_dependencies, falls back to deterministic edges derived from
+    graph_summary.internal_edges (top 5 by target in-degree).
     """
+    graph_summary = _compute_dependency_graph_summary(analysis_state)
+    fallback_deps = _build_fallback_key_dependencies(graph_summary)
+
     try:
-        graph_summary = _compute_dependency_graph_summary(analysis_state)
         payload = _build_interpretation_payload(analysis_state, graph_summary)
         prompt = _build_prompt(payload)
         response_text = _call_ollama(prompt)
@@ -33,10 +39,47 @@ def interpret_architecture(analysis_state: Dict) -> Optional[Dict]:
                 if fact.get("file_path")
             }
             parsed = _validate_interpretation(parsed, explored_paths)
-        return parsed
-    except Exception as exc:  # pragma: no cover - fallback safety for optional layer
+            # AI returned valid JSON but validation stripped all edges
+            # (model pointed only at external libs / phantom files).
+            if not parsed.get("key_dependencies"):
+                parsed["key_dependencies"] = fallback_deps
+            return parsed
+    except Exception as exc:
         LOGGER.warning("AI interpretation failed: %s", exc)
-        return None
+
+    # AI path failed entirely (timeout, parse error, or returned None).
+    return {
+        "architecture_pattern": "Not available",
+        "main_components": [],
+        "key_dependencies": fallback_deps,
+        "confidence": 0.0,
+    }
+
+
+def _build_fallback_key_dependencies(graph_summary: Dict) -> list:
+    """
+    Top 5 internal edges by target in-degree, formatted as key_dependencies
+    entries with the deterministic-fallback reason string.
+    """
+    edges = graph_summary.get("internal_edges", [])
+    in_degree: Dict[str, int] = {}
+    for edge in edges:
+        target = edge.get("to")
+        if target:
+            in_degree[target] = in_degree.get(target, 0) + 1
+    top_edges = sorted(
+        (e for e in edges if e.get("from") and e.get("to")),
+        key=lambda e: in_degree.get(e["to"], 0),
+        reverse=True,
+    )[:5]
+    return [
+        {
+            "from": e["from"],
+            "to": e["to"],
+            "reason": "high-import-count dependency (deterministic fallback)",
+        }
+        for e in top_edges
+    ]
 
 
 def _build_interpretation_payload(analysis_state: Dict, graph_summary: Dict) -> Dict:
@@ -83,6 +126,14 @@ def _build_prompt(payload: Dict) -> str:
     return (
         "You are analyzing repository architecture from dependency evidence.\n"
         "Use only the provided data. Do not invent files.\n"
+        "\n"
+        "key_dependencies must be edges between two files that appear in the "
+        "inspected_facts list. Both 'from' and 'to' must be actual file paths "
+        "from that list — not external libraries (fastapi, react, numpy etc.), "
+        "not invented paths, not directories. If you are unsure, omit the edge. "
+        "For example, an edge from app/services/auth.py to app/models/user.py "
+        "is valid; an edge from app/main.py to 'fastapi' is not.\n"
+        "\n"
         "Return JSON only, matching this schema:\n"
         f"{json.dumps(schema)}\n\n"
         "Evidence:\n"
@@ -117,7 +168,7 @@ def _call_ollama(prompt: str) -> str:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:
+            with urllib.request.urlopen(request, timeout=180) as response:
                 raw = response.read().decode("utf-8")
             payload = json.loads(raw)
             return payload.get("response", "")
@@ -155,6 +206,8 @@ def _validate_interpretation(interpretation: Dict, explored_paths: set) -> Dict:
     - Components: filter file list to explored files only, but keep the component
       even if no files survive (name + description are still meaningful).
     - Key dependencies: only keep edges where both endpoints were actually explored.
+    Deterministic key_dependencies fallback lives in interpret_architecture so it
+    also fires when the AI call itself fails (timeout / parse error).
     """
     components = []
     for component in interpretation.get("main_components", []):

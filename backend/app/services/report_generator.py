@@ -240,6 +240,12 @@ def _render_html(payload: Dict) -> str:
       margin-bottom: 10px;
       background: #f9fffe;
     }}
+    .fallback-note {{
+      color: var(--muted);
+      font-size: 13px;
+      font-style: italic;
+      margin: 0 0 10px 0;
+    }}
     table {{
       width: 100%;
       border-collapse: collapse;
@@ -350,6 +356,15 @@ def _render_html(payload: Dict) -> str:
     if ((data.ai.key_dependencies || []).length === 0) {{
       depsRoot.innerHTML = "<p>No AI dependency interpretation available.</p>";
     }} else {{
+      const isFallback = data.ai.key_dependencies.some(
+        d => (d.reason || "").includes("deterministic fallback")
+      );
+      if (isFallback) {{
+        const note = document.createElement("p");
+        note.className = "fallback-note";
+        note.textContent = "(deterministic — AI filtering produced no valid edges)";
+        depsRoot.appendChild(note);
+      }}
       data.ai.key_dependencies.forEach(dep => {{
         const el = document.createElement("div");
         el.className = "dep";

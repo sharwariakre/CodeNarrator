@@ -23,6 +23,13 @@ from app.services.agentic_analysis_service import (
 )
 from app.services import report_generator
 from app.services.report_generator import generate_html_report
+from app.services import ai_interpreter
+from app.services.ai_interpreter import (
+    _build_fallback_key_dependencies,
+    _build_prompt,
+    _validate_interpretation,
+    interpret_architecture,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -744,3 +751,101 @@ class TestGenerateHtmlReport:
             # Phantom node tooltip branch
             assert 'd.cluster === "unvisited"' in content
             assert "Referenced in imports but not explored by the agent." in content
+
+
+# ---------------------------------------------------------------------------
+# ai_interpreter — prompt constraint + deterministic key_dependencies fallback
+# ---------------------------------------------------------------------------
+
+class TestInterpreterPromptAndFallback:
+    def test_prompt_contains_file_to_file_constraint(self):
+        prompt = _build_prompt({
+            "internal_edges": [],
+            "clusters": [],
+            "highest_dependency_files": [],
+            "inspected_facts": [],
+        })
+        # Hard constraint that distinguishes file-to-file edges from external libs.
+        assert "Both 'from' and 'to' must be actual file paths" in prompt
+        # Single-sentence example replaces the inline JSON pair (kept short to
+        # avoid encouraging long model output that risks the Ollama timeout).
+        assert "is valid" in prompt
+        assert "is not" in prompt
+        assert "fastapi" in prompt
+
+    def test_fallback_ranks_by_target_in_degree(self):
+        graph_summary = {
+            "internal_edges": [
+                {"from": "app/main.py",          "to": "app/services/auth.py"},
+                {"from": "app/services/auth.py", "to": "app/models/user.py"},
+                {"from": "app/main.py",          "to": "app/models/user.py"},
+                # user.py has in-degree 2; auth.py has in-degree 1.
+            ],
+        }
+        result = _build_fallback_key_dependencies(graph_summary)
+        assert len(result) > 0
+        assert result[0]["to"] == "app/models/user.py"
+        for dep in result:
+            assert dep["reason"] == "high-import-count dependency (deterministic fallback)"
+
+    def test_fallback_caps_at_five_edges(self):
+        # Many edges all pointing at distinct targets — fallback caps result at 5.
+        edges = [{"from": f"src/a{i}.py", "to": f"src/b{i}.py"} for i in range(10)]
+        result = _build_fallback_key_dependencies({"internal_edges": edges})
+        assert len(result) == 5
+
+    def test_fallback_empty_when_no_internal_edges(self):
+        assert _build_fallback_key_dependencies({"internal_edges": []}) == []
+        assert _build_fallback_key_dependencies({}) == []
+
+    def test_validate_strips_external_and_phantom_edges(self):
+        # Without graph_summary the validator just filters — the fallback
+        # responsibility now lives in interpret_architecture.
+        interpretation = {
+            "architecture_pattern": "MVC",
+            "main_components": [],
+            "key_dependencies": [
+                {"from": "app/main.py", "to": "fastapi", "reason": "uses FastAPI"},
+                {"from": "app/main.py", "to": "app/services/auth.py", "reason": "real"},
+            ],
+            "summary_for_new_developer": "...",
+        }
+        explored_paths = {"app/main.py", "app/services/auth.py"}
+        result = _validate_interpretation(interpretation, explored_paths)
+        assert len(result["key_dependencies"]) == 1
+        assert result["key_dependencies"][0]["to"] == "app/services/auth.py"
+
+    def test_interpret_architecture_returns_minimal_dict_on_ollama_failure(self, monkeypatch):
+        # Force a timeout-like failure from _call_ollama; interpret_architecture
+        # should swallow it and return a deterministic minimal dict rather than None.
+        def boom(prompt):
+            raise RuntimeError("timed out")
+        monkeypatch.setattr(ai_interpreter, "_call_ollama", boom)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp).resolve()
+            (repo / "a.py").write_text("from . import b\n")
+            (repo / "b.py").write_text("")
+
+            analysis_state = {
+                "repo_id": "test",
+                "current_summary": {"local_path": str(repo), "repo": "test"},
+                "inspected_facts": [
+                    {"file_path": "a.py", "language": "python", "role_hint": "module",
+                     "imported_modules": [".b"]},
+                ],
+                "dependency_edges": [{"source": "a.py", "imports": [".b"]}],
+                "package_roots": ["."],
+            }
+
+            result = interpret_architecture(analysis_state)
+
+            # Never None now.
+            assert isinstance(result, dict)
+            assert result["architecture_pattern"] == "Not available"
+            assert result["main_components"] == []
+            assert result["confidence"] == 0.0
+            # The deterministic fallback fires even when AI fails entirely.
+            assert len(result["key_dependencies"]) >= 1
+            for dep in result["key_dependencies"]:
+                assert dep["reason"] == "high-import-count dependency (deterministic fallback)"
