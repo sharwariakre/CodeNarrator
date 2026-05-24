@@ -51,6 +51,20 @@ def load_state(repo_id: str, local_path: str, cache_dir: Path) -> Optional[Dict]
     return payload.get("final_state")
 
 
+def delete_state(repo_id: str, cache_dir: Path) -> None:
+    """
+    Remove the cache file for a repo_id, if present. Idempotent — missing
+    file is not an error. Use to force a fresh analysis on the next run
+    regardless of git HEAD or staleness state.
+    """
+    cache_file = _cache_path(cache_dir, repo_id)
+    try:
+        cache_file.unlink(missing_ok=True)
+        LOGGER.info("Deleted cached state for %s", repo_id)
+    except OSError as exc:
+        LOGGER.warning("Failed to delete cache for %s: %s", repo_id, exc)
+
+
 def list_history(cache_dir: Path) -> list:
     """
     Return metadata for all cached analyses, sorted newest first.

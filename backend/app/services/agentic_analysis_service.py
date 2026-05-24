@@ -5,6 +5,7 @@ returns the same dict shape so the route needs no changes to its response handli
 """
 import json
 import logging
+import os
 import re
 import time
 from dataclasses import dataclass
@@ -202,6 +203,12 @@ def run_agentic_analysis_loop(
     messages: List = [_build_system_message(state)]
     step_trace: List[Dict] = []
     consecutive_no_file_steps = 0
+    # Total non-file-reading steps (search, mark_insight, nudge turns).
+    # Capped at max_steps // 3 so non-exploring actions can't silently
+    # consume the whole step budget. When the cap is hit, the loop
+    # force-reads the next unexplored file just like the consecutive guard.
+    total_non_file_steps = 0
+    max_non_file_steps = max_steps // 3
     # Max recent messages to keep (excluding the system prompt at index 0).
     # Prevents context from growing unboundedly and slowing down Ollama calls.
     _MAX_HISTORY = 12
@@ -236,6 +243,23 @@ def run_agentic_analysis_loop(
                 state["stop_reason"] = "All candidate files have been explored."
                 break
 
+        # Non-file budget guard: even if non-file steps aren't consecutive,
+        # too many cumulatively still wastes the run. Force-read once the
+        # cap is exceeded.
+        if total_non_file_steps >= max_non_file_steps:
+            forced = _next_unexplored(state)
+            if forced:
+                LOGGER.info(
+                    "Step %d: force-reading '%s' — non-file budget (%d/%d) exhausted.",
+                    step, forced, total_non_file_steps, max_non_file_steps,
+                )
+                result, _ = _tool_read_file(state, forced)
+                messages.append({"role": "tool", "content": result, "tool_use_id": "force_read"})
+                step_trace.append(_trace_entry(step, "force_read_budget", state))
+                total_non_file_steps = 0  # reset after force-read
+                consecutive_no_file_steps = 0
+                continue
+
         # Trim history: always keep system prompt (index 0) + last _MAX_HISTORY messages.
         if len(messages) > _MAX_HISTORY + 1:
             messages = [messages[0]] + messages[-_MAX_HISTORY:]
@@ -256,6 +280,7 @@ def run_agentic_analysis_loop(
             messages.append(_nudge_message(state))
             step_trace.append(_trace_entry(step, None, state))
             consecutive_no_file_steps += 1
+            total_non_file_steps += 1
             continue
 
         explored_this_step: Optional[str] = None
@@ -290,6 +315,7 @@ def run_agentic_analysis_loop(
             # Tool calls made but no new file explored — nudge and count.
             messages.append(_nudge_message(state))
             consecutive_no_file_steps += 1
+            total_non_file_steps += 1
 
         step_trace.append(_trace_entry(step, explored_this_step, state))
 
@@ -297,6 +323,10 @@ def run_agentic_analysis_loop(
             break
 
     state["dependency_graph_summary"] = _compute_dependency_graph_summary(state)
+    # Persist for diagnostic visibility in the cache. Pydantic's
+    # AnalysisState ignores extras, so this survives JSON serialization to
+    # disk but is stripped from the API response.
+    state["total_non_file_steps"] = total_non_file_steps
     # Keep candidate_files fresh so AnalysisState validation passes.
     _refresh_candidates_for_signal(state, limit=8)
 
@@ -362,6 +392,19 @@ def _build_system_message(state: Dict) -> Dict:
     explored_str = ", ".join(explored) if explored else "none yet"
     unknowns_str = "; ".join(unknowns) if unknowns else "none"
 
+    # Compute visited vs unvisited directory sets so the agent doesn't have
+    # to mentally parse "Already explored" to figure out where it hasn't been.
+    explored_files = state.get("explored_files", [])
+    all_files = state.get("_cached_files", [])
+    explored_dirs = set(
+        os.path.dirname(f) for f in explored_files if os.path.dirname(f)
+    )
+    all_dirs = set(
+        os.path.dirname(f) for f in all_files if os.path.dirname(f)
+    )
+    unvisited_dirs = sorted(all_dirs - explored_dirs)
+    visited_dirs = sorted(explored_dirs)
+
     min_files = min(15, max(6, int(summary["file_count"] * 0.65)))
 
     dir_tree = _build_dir_tree(cached_files)
@@ -375,12 +418,19 @@ def _build_system_message(state: Dict) -> Dict:
         f"Already explored: {explored_str}\n"
         f"Open questions: {unknowns_str}\n\n"
         f"Suggested starting candidates:\n{candidate_lines}\n\n"
+        f"Visited directories: {', '.join(visited_dirs) if visited_dirs else 'none yet'}\n"
+        f"NOT YET VISITED (prioritize these): {', '.join(unvisited_dirs) if unvisited_dirs else 'all covered'}\n\n"
         f"RULES (follow strictly):\n"
         f"1. You MUST call read_file or follow_import at least {min_files} times before "
         f"calling stop_analysis. Do not stop early.\n"
         f"2. After reading a file, always follow at least one of its imports with follow_import "
         f"to trace the dependency chain.\n"
-        f"3. Cover different directories and roles — not just one cluster of files.\n"
+        f"3. Actively spread across directories — after every 2-3 files you "
+        f"read in the same directory, deliberately pick a file from a directory "
+        f"you have NOT yet visited. Check the directory tree and identify which "
+        f"top-level folders have zero explored files, then prioritize those. "
+        f"A good analysis covers components/, utils/, hooks/, services/, api/, "
+        f"types/ — not just the entry point chain.\n"
         f"4. Use mark_architecture_insight to record what you learn about entry points, "
         f"components, and patterns.\n"
         f"5. Only call stop_analysis after you have read at least {min_files} files AND "
@@ -418,8 +468,10 @@ def _build_language_guidance(languages: List[str], files: List[str], repo_path: 
             )
         if "vite.config.ts" in file_set or "vite.config.js" in file_set:
             js_lines.append(
-                "Vite detected — prioritize src/main.tsx or src/main.ts as "
-                "entry point, then src/App.tsx."
+                "Vite detected — start at src/main.tsx or src/main.ts to "
+                "understand the entry point, then SPREAD OUT: explore one "
+                "file from each major directory (components/, utils/, hooks/, "
+                "api/, types/) before going deeper into any single chain."
             )
         pkg_entry = _read_package_json_entry(repo_path)
         if pkg_entry:
@@ -427,7 +479,9 @@ def _build_language_guidance(languages: List[str], files: List[str], repo_path: 
         js_lines.append(
             "General JS/TS: prioritize index.ts, App.tsx, main.ts, router "
             "files, and any file named index.ts inside a directory (barrel "
-            "files reveal the public API of that module)."
+            "files reveal the public API of that module). "
+            "Do not follow a single import chain all the way down — read one "
+            "file per directory before revisiting any directory."
         )
         blocks.append("\n".join(js_lines))
 
@@ -532,7 +586,13 @@ def _tool_read_file(state: Dict, file_path: str) -> Tuple[str, Optional[str]]:
                 None,
             )
 
-    candidate_is_import_target = file_path in _resolved_import_targets(state)
+    repo_path = Path(state["current_summary"]["local_path"]).resolve()
+    candidate_is_import_target = file_path in _resolved_import_targets(
+        state,
+        repo_path=repo_path,
+        package_roots=state.get("package_roots", []),
+        scanned_files=set(state.get("_cached_files", [])),
+    )
     inspected = _inspect_file(state, file_path)
     if inspected is None:
         return (
@@ -781,18 +841,30 @@ def _file_preview(path: Path) -> str:
 def _next_unexplored(state: Dict) -> Optional[str]:
     """
     Return the next unexplored file, or None if all files have been explored.
-    Checks candidate_files first (scored/prioritised), then falls back to
-    scanning ALL repo files so nothing is missed.
+
+    Selection order:
+      1. Prioritised candidates from a directory not yet visited (breadth-first
+         pressure — counteracts the depth-first chain-following tendency).
+      2. Any prioritised candidate.
+      3. Any file in the repo.
     """
     explored = set(state.get("explored_files", []))
+    explored_dirs = set(os.path.dirname(f) for f in explored)
 
-    # 1. Prioritised candidates first (skip noise files).
+    # First pass: candidates in unvisited directories.
+    for c in state.get("candidate_files", []):
+        fp = c["file_path"]
+        if fp not in explored and not _is_noise_file(fp):
+            if os.path.dirname(fp) not in explored_dirs:
+                return fp
+
+    # Second pass: any unvisited candidate (visited directory is acceptable here).
     for c in state.get("candidate_files", []):
         fp = c["file_path"]
         if fp not in explored and not _is_noise_file(fp):
             return fp
 
-    # 2. Fall back to every file in the repo (skip noise files).
+    # Final fallback: every file in the repo.
     for f in state.get("_cached_files", []):
         if f not in explored and not _is_noise_file(f):
             return f
@@ -803,6 +875,11 @@ def _nudge_message(state: Dict) -> Dict:
     """
     Injected as a user turn when the model goes silent or makes no file-exploring call.
     Lists unexplored files explicitly so the model has a clear next action.
+
+    Prefers files from directories the agent has not yet visited. Same-chain
+    import targets are only surfaced when no unvisited-directory candidates
+    are available — this counteracts the agent's tendency to follow a single
+    import chain depth-first.
     """
     explored = set(state.get("explored_files", []))
     candidates = [
@@ -810,12 +887,40 @@ def _nudge_message(state: Dict) -> Dict:
         if c["file_path"] not in explored and not _is_noise_file(c["file_path"])
     ]
     # Also surface any files reachable via imports that haven't been read yet.
+    # Pass repo context when available so resolved paths carry file extensions
+    # — degrades to naive arithmetic if state lacks current_summary (e.g. tests).
+    local_path = state.get("current_summary", {}).get("local_path")
+    repo_path = Path(local_path).resolve() if local_path else None
     import_targets = [
-        t for t in _resolved_import_targets(state)
+        t for t in _resolved_import_targets(
+            state,
+            repo_path=repo_path,
+            package_roots=state.get("package_roots", []),
+            scanned_files=set(state.get("_cached_files", [])) if repo_path else None,
+        )
         if t not in explored and not _is_noise_file(t)
     ]
-    unexplored = candidates + [t for t in import_targets if t not in candidates]
 
+    explored_dirs = set(
+        os.path.dirname(f) for f in state.get("explored_files", [])
+    )
+    unvisited_candidates = [
+        c for c in candidates
+        if os.path.dirname(c) not in explored_dirs
+    ]
+
+    if unvisited_candidates:
+        file_list = "\n".join(f"  - {f}" for f in unvisited_candidates[:8])
+        return {
+            "role": "user",
+            "content": (
+                f"You have stayed in the same directory too long. These files are "
+                f"from directories you have not yet explored — pick one and call "
+                f"read_file:\n{file_list}"
+            ),
+        }
+
+    unexplored = candidates + [t for t in import_targets if t not in candidates]
     if unexplored:
         file_list = "\n".join(f"  - {f}" for f in unexplored[:8])
         return {

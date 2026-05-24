@@ -22,6 +22,26 @@ KNOWN_TOP_LEVEL_DIRS = {
     "app",
     "tests",
     "docs",
+    # Common functional/layered directory names in real-world JS/TS and Python
+    # projects. Previously these earned no domain-signal boost despite being
+    # standard architectural layers.
+    "utils",
+    "hooks",
+    "services",
+    "api",
+    "types",
+    "components",
+    "datasources",
+    "lib",
+    "helpers",
+    "middleware",
+    "store",
+    "context",
+    "features",
+    "modules",
+    "controllers",
+    "repositories",
+    "domain",
 }
 
 

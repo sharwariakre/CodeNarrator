@@ -76,6 +76,7 @@ class RepoAnalysisSnapshotResponse(BaseModel):
 class AnalysisLoopRequest(BaseModel):
     analysis_state: AnalysisState
     max_steps: int = 15
+    force_refresh: bool = False
 
 
 class CachedStateRequest(BaseModel):

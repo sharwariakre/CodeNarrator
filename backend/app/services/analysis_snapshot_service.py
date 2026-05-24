@@ -638,7 +638,12 @@ def _refresh_candidates_for_signal(state: Dict, limit: int) -> None:
     file_languages: Dict[str, str] = scan_result["file_languages"]
     explored = set(state["explored_files"])
 
-    known_targets = _resolved_import_targets(state)
+    known_targets = _resolved_import_targets(
+        state,
+        repo_path=repo_path,
+        package_roots=state.get("package_roots", []),
+        scanned_files=set(files),
+    )
     scored: List[Tuple[Tuple[int, str], Dict]] = []
     for file_path in files:
         if file_path in explored:
@@ -674,16 +679,49 @@ def _refresh_candidates_for_signal(state: Dict, limit: int) -> None:
     state["candidate_files"] = candidates
 
 
-def _resolved_import_targets(state: Dict) -> Set[str]:
-    """Return the set of internal file paths that explored files import."""
-    targets: Set[str] = set()
+def _resolved_import_targets(
+    state: Dict,
+    repo_path: Path | None = None,
+    package_roots: List[str] | None = None,
+    scanned_files: Set[str] | None = None,
+) -> Counter:
+    """
+    Return a Counter mapping internal file paths → number of explored files
+    that import that path.
+
+    When ``repo_path`` and ``scanned_files`` are provided, uses the full
+    ``_resolve_internal_import`` — which resolves relative imports to actual
+    files with extensions and handles Python absolute imports via package
+    roots. This matches what ``_compute_dependency_graph_summary`` produces.
+
+    Without repo context, falls back to naive POSIX-path arithmetic on
+    relative-only imports. The fallback strips file extensions (e.g.
+    ``./formFieldsSource`` → ``datasources/formFieldsSource``), so callers
+    that compare against real ``scanned_files`` paths should always pass
+    repo context — otherwise the comparison never matches.
+
+    The Counter shape lets callers reward files imported by multiple
+    explored files higher than files imported by one.
+    """
+    targets: Counter = Counter()
+    package_root_paths = [Path(r) for r in (package_roots or [])]
     for edge in state.get("dependency_edges", []):
         source = edge["source"]
-        source_dir = posixpath.dirname(source)
         for imp in edge.get("imports", []):
-            if imp.startswith(("./", "../")):
-                resolved = posixpath.normpath(posixpath.join(source_dir, imp))
-                targets.add(resolved)
+            if repo_path is not None and scanned_files is not None:
+                resolved = _resolve_internal_import(
+                    repo_path=repo_path,
+                    source_file=source,
+                    import_specifier=imp,
+                    package_roots=package_root_paths,
+                    scanned_files=scanned_files,
+                )
+                if resolved:
+                    targets[resolved] += 1
+            elif imp.startswith(("./", "../")):
+                source_dir = posixpath.dirname(source)
+                naive = posixpath.normpath(posixpath.join(source_dir, imp))
+                targets[naive] += 1
     return targets
 
 
@@ -691,7 +729,7 @@ def _candidate_signal_score(
     state: Dict,
     file_path: str,
     file_languages: Dict[str, str],
-    known_targets: Set[str] | None = None,
+    known_targets: Counter | None = None,
 ) -> Tuple[int, List[str]]:
     name = Path(file_path).name
     top_level_dir = Path(file_path).parts[0] if Path(file_path).parts else ""
@@ -728,6 +766,17 @@ def _candidate_signal_score(
         score += 3
         reasons.append("new directory context")
 
+    # Unvisited-directory bonus on top of "new directory context".
+    # Combined: +7 for a candidate in a directory the agent hasn't entered yet,
+    # which outweighs the +3 known-import-target chain-following bias below.
+    explored_dirs = set(
+        str(Path(f).parent) for f in state.get("explored_files", [])
+    )
+    file_dir = str(Path(file_path).parent)
+    if file_dir not in explored_dirs:
+        score += 4
+        reasons.append("unvisited directory")
+
     if role_hint not in inspected_roles:
         score += 2
         reasons.append(f"new file role ({role_hint})")
@@ -748,11 +797,15 @@ def _candidate_signal_score(
     # Boost files that are known import targets from already-explored files.
     # These are high-value: exploring them reveals their own imports and
     # completes the dependency graph rather than hitting dead-end files.
+    # Bonus scales with in-degree (how many explored files import this one),
+    # capped at +9 so even a heavily-imported leaf doesn't dominate breadth.
     if known_targets is None:
         known_targets = _resolved_import_targets(state)
     if file_path in known_targets:
-        score += 5
-        reasons.append("known import target from explored files")
+        import_count = known_targets[file_path]
+        bonus = min(import_count * 3, 9)
+        score += bonus
+        reasons.append(f"known import target from {import_count} explored file(s)")
 
     if role_hint == "test":
         score -= 2

@@ -4,11 +4,13 @@ Covers: import extraction, internal import resolution, noise file filtering,
 and dependency graph computation.
 """
 import tempfile
+from collections import Counter
 from pathlib import Path
 
 import pytest
 
 from app.services.analysis_snapshot_service import (
+    _candidate_signal_score,
     _compute_dependency_graph_summary,
     _extract_imports_for_file,
     _extract_java_imports,
@@ -16,10 +18,13 @@ from app.services.analysis_snapshot_service import (
     _extract_javascript_imports,
     _extract_python_imports,
     _resolve_internal_import,
+    _resolved_import_targets,
 )
 from app.services.agentic_analysis_service import (
     _build_language_guidance,
     _is_noise_file,
+    _next_unexplored,
+    _nudge_message,
 )
 from app.services import report_generator
 from app.services.report_generator import generate_html_report
@@ -29,6 +34,11 @@ from app.services.ai_interpreter import (
     _build_prompt,
     _validate_interpretation,
     interpret_architecture,
+)
+from app.services.analysis_state_store import (
+    delete_state,
+    load_state,
+    save_state,
 )
 
 
@@ -526,6 +536,56 @@ class TestResolveInternalImport:
         )
         assert result is None
 
+    # ---- _resolved_import_targets ----
+
+    def test_resolved_import_targets_uses_real_resolver_with_repo_context(self):
+        # The bug we fixed: ./formFieldsSource was being stored as
+        # "datasources/formFieldsSource" (no extension), which never matched
+        # the actual file "datasources/formFieldsSource.ts" in scanned_files.
+        # With repo context, the resolver now returns the correct path.
+        repo = self._make_repo({
+            "datasources/index.ts": "",
+            "datasources/formFieldsSource.ts": "",
+        })
+        state = {
+            "dependency_edges": [
+                {
+                    "source": "datasources/index.ts",
+                    "imports": ["./formFieldsSource"],
+                }
+            ],
+        }
+        scanned = {"datasources/index.ts", "datasources/formFieldsSource.ts"}
+
+        result = _resolved_import_targets(
+            state,
+            repo_path=repo,
+            package_roots=[],
+            scanned_files=scanned,
+        )
+
+        assert "datasources/formFieldsSource.ts" in result
+        # The naive extension-less path must NOT be in the result.
+        assert "datasources/formFieldsSource" not in result
+
+    def test_resolved_import_targets_falls_back_without_repo_context(self):
+        # Backward compat: callers that don't pass repo context still get the
+        # naive arithmetic. The dead-code call sites still rely on this.
+        state = {
+            "dependency_edges": [
+                {
+                    "source": "datasources/index.ts",
+                    "imports": ["./formFieldsSource"],
+                }
+            ],
+        }
+
+        result = _resolved_import_targets(state)
+
+        # Naive arithmetic preserves the legacy (broken) behavior — confirms
+        # the fallback path is exercised when no repo context is passed.
+        assert "datasources/formFieldsSource" in result
+
 
 # ---------------------------------------------------------------------------
 # _compute_dependency_graph_summary
@@ -615,6 +675,8 @@ class TestBuildLanguageGuidance:
             assert "General JS/TS" in out
             assert "Next.js" not in out
             assert "Vite" not in out
+            # Breadth-first instruction appended to the general JS/TS block.
+            assert "read one file per directory" in out
 
     def test_typescript_picks_up_next_config(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -631,6 +693,8 @@ class TestBuildLanguageGuidance:
             )
             assert "Vite detected" in out
             assert "src/main.tsx" in out
+            # Breadth-first instruction in the Vite block.
+            assert "SPREAD OUT" in out
 
     def test_reads_package_json_main_field(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -849,3 +913,290 @@ class TestInterpreterPromptAndFallback:
             assert len(result["key_dependencies"]) >= 1
             for dep in result["key_dependencies"]:
                 assert dep["reason"] == "high-import-count dependency (deterministic fallback)"
+
+
+# ---------------------------------------------------------------------------
+# Directory-aware exploration: _next_unexplored and _nudge_message
+# ---------------------------------------------------------------------------
+
+class TestNudgeAndNextUnexplored:
+    def test_next_unexplored_prefers_unvisited_directory(self):
+        # Same-dir candidate is listed first, but the unvisited-dir candidate
+        # should still win because of the first-pass dir-aware preference.
+        state = {
+            "explored_files": ["src/components/Button.tsx"],
+            "candidate_files": [
+                {"file_path": "src/components/Card.tsx", "reason": "same dir"},
+                {"file_path": "src/utils/format.ts",     "reason": "unvisited"},
+            ],
+            "_cached_files": [
+                "src/components/Button.tsx",
+                "src/components/Card.tsx",
+                "src/utils/format.ts",
+            ],
+        }
+        assert _next_unexplored(state) == "src/utils/format.ts"
+
+    def test_next_unexplored_falls_back_when_all_dirs_visited(self):
+        # Only candidate lives in the already-visited directory — first pass
+        # finds nothing, second pass returns it rather than going to fallback.
+        state = {
+            "explored_files": ["src/components/Button.tsx"],
+            "candidate_files": [
+                {"file_path": "src/components/Card.tsx", "reason": "same dir"},
+            ],
+            "_cached_files": [
+                "src/components/Button.tsx",
+                "src/components/Card.tsx",
+            ],
+        }
+        assert _next_unexplored(state) == "src/components/Card.tsx"
+
+    def test_nudge_prefers_unvisited_directory_candidates(self):
+        state = {
+            "explored_files": ["src/components/Button.tsx"],
+            "candidate_files": [
+                {"file_path": "src/components/Card.tsx", "reason": "same dir"},
+                {"file_path": "src/utils/format.ts",     "reason": "unvisited"},
+            ],
+            "dependency_edges": [],
+        }
+        result = _nudge_message(state)
+        content = result["content"]
+        # New "stayed in same directory" wording is used.
+        assert "stayed in the same directory" in content
+        # Unvisited-dir candidate is surfaced.
+        assert "src/utils/format.ts" in content
+        # Same-dir candidate is NOT listed when an unvisited one is available.
+        assert "src/components/Card.tsx" not in content
+
+    def test_nudge_falls_back_to_combined_list_when_no_unvisited_dirs(self):
+        # All candidates live in the already-visited directory and there are no
+        # import targets to surface — we expect the original generic wording.
+        state = {
+            "explored_files": ["src/components/Button.tsx"],
+            "candidate_files": [
+                {"file_path": "src/components/Card.tsx", "reason": "same dir"},
+            ],
+            "dependency_edges": [],
+        }
+        result = _nudge_message(state)
+        content = result["content"]
+        assert "stayed in the same directory" not in content
+        # Falls back to the original generic prompt …
+        assert "have not yet read these files" in content
+        # … which surfaces the same-dir candidate as a last resort.
+        assert "src/components/Card.tsx" in content
+
+
+# ---------------------------------------------------------------------------
+# analysis_state_store — delete_state and force_refresh semantics
+# ---------------------------------------------------------------------------
+
+class TestDeleteStateAndForceRefresh:
+    def test_delete_state_removes_existing_cache(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cache_dir = tmp_path / "cache"
+            save_state(
+                repo_id="myrepo",
+                local_path=str(tmp_path),
+                final_state={"k": "v"},
+                cache_dir=cache_dir,
+            )
+            cache_file = cache_dir / "myrepo.json"
+            assert cache_file.exists()
+
+            delete_state(repo_id="myrepo", cache_dir=cache_dir)
+            assert not cache_file.exists()
+
+    def test_delete_state_missing_file_is_noop(self):
+        # Should not raise, and should not create the file.
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp) / "cache"
+            cache_dir.mkdir()
+            delete_state(repo_id="never-existed", cache_dir=cache_dir)
+            assert not (cache_dir / "never-existed.json").exists()
+
+    def test_load_returns_none_after_delete_even_with_matching_hash(self, monkeypatch):
+        # Pin the git hash so load_state's staleness check would normally
+        # succeed — this isolates the delete behavior from staleness logic.
+        monkeypatch.setattr(
+            "app.services.analysis_state_store._get_git_commit_hash",
+            lambda local_path: "abc123",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            cache_dir = tmp_path / "cache"
+            save_state(
+                repo_id="myrepo",
+                local_path=str(tmp_path),
+                final_state={"k": "v"},
+                cache_dir=cache_dir,
+            )
+
+            # Sanity: with the git hash unchanged, load returns the cached state.
+            assert load_state("myrepo", str(tmp_path), cache_dir) == {"k": "v"}
+
+            delete_state(repo_id="myrepo", cache_dir=cache_dir)
+
+            # After delete, load returns None — even though git HEAD didn't move.
+            assert load_state("myrepo", str(tmp_path), cache_dir) is None
+
+
+# ---------------------------------------------------------------------------
+# _candidate_signal_score: unvisited-directory bonus and reduced chain pull
+# ---------------------------------------------------------------------------
+
+class TestCandidateSignalScore:
+    @staticmethod
+    def _state_with_explored(explored_files):
+        """Minimal state with explored_files mirrored as inspected_facts."""
+        return {
+            "explored_files": list(explored_files),
+            "inspected_facts": [
+                {
+                    "file_path": fp,
+                    "language": "python",
+                    "role_hint": "module",
+                    "directory": str(Path(fp).parent),
+                    "line_count_bucket": "small",
+                    "imported_modules": [],
+                }
+                for fp in explored_files
+            ],
+            "unknowns": [],
+            "current_summary": {
+                "top_level_dirs": ["src"],
+                "entry_points": [],
+                "languages": ["python"],
+            },
+            "dependency_edges": [],
+        }
+
+    def test_unvisited_directory_reason_fires(self):
+        state = self._state_with_explored(["src/foo.py"])
+        file_languages = {"src/foo.py": "python", "src/utils/bar.py": "python"}
+
+        score, reasons = _candidate_signal_score(
+            state, "src/utils/bar.py", file_languages, known_targets=set()
+        )
+
+        assert "unvisited directory" in reasons
+        # The pre-existing per-fact "new directory context" still fires alongside.
+        assert "new directory context" in reasons
+
+    def test_unvisited_directory_reason_does_not_fire_in_visited_dir(self):
+        # The candidate lives in the same directory the agent has already been in.
+        state = self._state_with_explored(["src/utils/foo.py"])
+        file_languages = {"src/utils/foo.py": "python", "src/utils/bar.py": "python"}
+
+        score, reasons = _candidate_signal_score(
+            state, "src/utils/bar.py", file_languages, known_targets=set()
+        )
+
+        assert "unvisited directory" not in reasons
+
+    def test_unvisited_directory_score_delta(self):
+        # Score the same candidate against two states that differ only in
+        # whether its parent directory has been explored. The score delta
+        # equals the +3 (new directory context) + +4 (unvisited directory)
+        # contributions for a total of +7.
+        file_languages = {
+            "src/foo.py": "python",
+            "src/utils/bar.py": "python",
+            "src/utils/baz.py": "python",
+        }
+        state_unvisited = self._state_with_explored(["src/foo.py"])
+        state_visited = self._state_with_explored(["src/foo.py", "src/utils/baz.py"])
+
+        score_unvisited, _ = _candidate_signal_score(
+            state_unvisited, "src/utils/bar.py", file_languages, known_targets=set()
+        )
+        score_visited, _ = _candidate_signal_score(
+            state_visited, "src/utils/bar.py", file_languages, known_targets=set()
+        )
+
+        assert score_unvisited - score_visited == 7
+
+    def test_known_import_target_bonus_three_for_single_importer(self):
+        # In-degree of 1 still earns +3 — same as the pre-Counter flat bonus.
+        state = self._state_with_explored(["src/foo.py"])
+        file_languages = {"src/foo.py": "python", "src/bar.py": "python"}
+
+        score_off, _ = _candidate_signal_score(
+            state, "src/bar.py", file_languages, known_targets=Counter()
+        )
+        score_on, reasons_on = _candidate_signal_score(
+            state, "src/bar.py", file_languages,
+            known_targets=Counter({"src/bar.py": 1}),
+        )
+
+        assert "known import target from 1 explored file(s)" in reasons_on
+        assert score_on - score_off == 3
+
+    def test_known_import_target_scales_with_in_degree(self):
+        state = self._state_with_explored(["src/foo.py"])
+        file_languages = {"src/foo.py": "python", "src/bar.py": "python"}
+
+        score_1, _ = _candidate_signal_score(
+            state, "src/bar.py", file_languages,
+            known_targets=Counter({"src/bar.py": 1}),
+        )
+        score_2, _ = _candidate_signal_score(
+            state, "src/bar.py", file_languages,
+            known_targets=Counter({"src/bar.py": 2}),
+        )
+        score_3, _ = _candidate_signal_score(
+            state, "src/bar.py", file_languages,
+            known_targets=Counter({"src/bar.py": 3}),
+        )
+
+        # 1*3=3, 2*3=6, 3*3=9 → each step +3 below the cap.
+        assert score_2 - score_1 == 3
+        assert score_3 - score_2 == 3
+
+    def test_known_import_target_capped_at_nine(self):
+        state = self._state_with_explored(["src/foo.py"])
+        file_languages = {"src/foo.py": "python", "src/bar.py": "python"}
+
+        score_3, _ = _candidate_signal_score(
+            state, "src/bar.py", file_languages,
+            known_targets=Counter({"src/bar.py": 3}),
+        )
+        score_10, reasons_10 = _candidate_signal_score(
+            state, "src/bar.py", file_languages,
+            known_targets=Counter({"src/bar.py": 10}),
+        )
+
+        # 3 importers → +9; 10 importers → capped at +9 (no further reward).
+        assert score_3 == score_10
+        # Reason string still reflects the true in-degree even though
+        # the score is capped — useful for debugging.
+        assert "known import target from 10 explored file(s)" in reasons_10
+
+    def test_unvisited_dir_outweighs_chain_candidate(self):
+        # Agent explored one file in src/services. Compare:
+        #   - chain candidate: another file in src/services, in known_targets
+        #   - breadth candidate: a file in src/utils, NOT in known_targets
+        # Breadth must outscore chain so the agent actually moves.
+        file_languages = {
+            "src/services/auth.py":   "python",
+            "src/services/helper.py": "python",  # chain candidate
+            "src/utils/format.py":    "python",  # breadth candidate
+        }
+        state = self._state_with_explored(["src/services/auth.py"])
+
+        chain_score, chain_reasons = _candidate_signal_score(
+            state, "src/services/helper.py", file_languages,
+            known_targets=Counter({"src/services/helper.py": 1}),
+        )
+        breadth_score, breadth_reasons = _candidate_signal_score(
+            state, "src/utils/format.py", file_languages,
+            known_targets=Counter(),
+        )
+
+        assert breadth_score > chain_score, (
+            f"breadth ({breadth_score}: {breadth_reasons}) "
+            f"should outscore chain ({chain_score}: {chain_reasons})"
+        )

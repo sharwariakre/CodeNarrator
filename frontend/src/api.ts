@@ -113,11 +113,16 @@ export async function runLoopStream(
   state: AnalysisState,
   maxSteps: number,
   onProgress: (event: ProgressEvent) => void,
+  forceRefresh: boolean = false,
 ): Promise<LoopResponse> {
   const res = await fetch(`${BASE}/snapshot/run/stream`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ analysis_state: state, max_steps: maxSteps }),
+    body: JSON.stringify({
+      analysis_state: state,
+      max_steps: maxSteps,
+      force_refresh: forceRefresh,
+    }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));

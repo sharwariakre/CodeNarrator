@@ -103,6 +103,7 @@ export default function App() {
         snapshot.analysis_state,
         DEPTH_OPTIONS[depthIdx].steps,
         (evt) => setLiveFile(`${evt.file} · ${evt.explored} files · ${(evt.confidence * 100).toFixed(0)}%`),
+        true,  // force_refresh: manual Analyze always bypasses the cache
       );
       setLiveFile(null);
       const finalState: AnalysisState = loopResult.final_state;
