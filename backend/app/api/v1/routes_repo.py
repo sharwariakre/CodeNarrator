@@ -29,7 +29,12 @@ from app.services.analysis_snapshot_service import (
 from app.services.agentic_analysis_service import run_agentic_analysis_loop
 from app.services.ai_interpreter import interpret_architecture
 from app.services.report_generator import generate_html_report
-from app.services.analysis_state_store import save_state, load_state, list_history
+from app.services.analysis_state_store import (
+    delete_state,
+    list_history,
+    load_state,
+    save_state,
+)
 
 router = APIRouter(prefix="/repos", tags=["repos"])
 
@@ -104,6 +109,12 @@ async def run_repo_snapshot_loop(payload: AnalysisLoopRequest):
             detail=f"Repository path not found: {requested_path}",
         )
 
+    if payload.force_refresh:
+        delete_state(
+            repo_id=payload.analysis_state.repo_id,
+            cache_dir=_resolve_cache_dir(),
+        )
+
     initial_state = payload.analysis_state.model_dump()
     loop_result = await asyncio.to_thread(
         run_agentic_analysis_loop, initial_state, payload.max_steps
@@ -137,6 +148,12 @@ async def stream_repo_snapshot_loop(payload: AnalysisLoopRequest):
 
     if not requested_path.exists() or not requested_path.is_dir():
         raise HTTPException(status_code=404, detail=f"Repository path not found: {requested_path}")
+
+    if payload.force_refresh:
+        delete_state(
+            repo_id=payload.analysis_state.repo_id,
+            cache_dir=_resolve_cache_dir(),
+        )
 
     initial_state = payload.analysis_state.model_dump()
     event_loop = asyncio.get_event_loop()
