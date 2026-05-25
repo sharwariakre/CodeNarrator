@@ -48,11 +48,15 @@ def _build_report_payload(final_state: Dict, interpretation: Dict | None) -> Dic
 
     internal_edges = graph_summary.get("internal_edges", [])
     explored_set = set(node_file_paths)
+    # Filter __init__.py from the visualization — they're package markers,
+    # not architecture, and clutter the graph without adding signal.
     # Include edges where the source was explored, even if the target was not.
     visible_edges = [
         {"source": edge["from"], "target": edge["to"]}
         for edge in internal_edges
         if edge.get("from") in explored_set
+        and Path(edge["from"]).name != "__init__.py"
+        and Path(edge["to"]).name != "__init__.py"
     ]
 
     # Targets that were never explored become phantom nodes.
@@ -61,7 +65,10 @@ def _build_report_payload(final_state: Dict, interpretation: Dict | None) -> Dic
         if edge["target"] not in explored_set
     }
 
-    all_node_ids = list(node_file_paths) + list(phantom_ids)
+    all_node_ids = [
+        fp for fp in (list(node_file_paths) + list(phantom_ids))
+        if Path(fp).name != "__init__.py"
+    ]
     incoming_count: Dict[str, int] = {file_path: 0 for file_path in all_node_ids}
     for edge in visible_edges:
         target = edge.get("target")
@@ -70,6 +77,8 @@ def _build_report_payload(final_state: Dict, interpretation: Dict | None) -> Dic
 
     nodes = []
     for file_path in node_file_paths:
+        if Path(file_path).name == "__init__.py":
+            continue
         fact = fact_map.get(file_path, {})
         nodes.append(
             {
@@ -84,6 +93,8 @@ def _build_report_payload(final_state: Dict, interpretation: Dict | None) -> Dic
             }
         )
     for file_path in phantom_ids:
+        if Path(file_path).name == "__init__.py":
+            continue
         nodes.append(
             {
                 "id": file_path,

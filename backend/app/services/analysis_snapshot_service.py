@@ -664,6 +664,25 @@ def _refresh_candidates_for_signal(state: Dict, limit: int) -> None:
 
     scored.sort(key=lambda item: item[0])
 
+    # Per-language coverage gate: when the dominant language is <50% explored,
+    # drop non-dominant-language candidates from the queue. Prevents the agent
+    # from chasing the strong "new language signal" into a second language
+    # while the first one is still under-covered.
+    explored_by_lang = Counter(
+        file_languages.get(f, "unknown") for f in state.get("explored_files", [])
+    )
+    total_by_lang = Counter(file_languages.values())
+    dominant_lang = max(total_by_lang, key=total_by_lang.get) if total_by_lang else None
+    dominant_coverage = (
+        explored_by_lang.get(dominant_lang, 0) / total_by_lang.get(dominant_lang, 1)
+        if dominant_lang else 1.0
+    )
+    if dominant_lang and dominant_coverage < 0.5:
+        scored = [
+            item for item in scored
+            if file_languages.get(item[1]["file_path"], dominant_lang) == dominant_lang
+        ]
+
     candidates = [candidate for _, candidate in scored[:limit]]
     if not candidates:
         # Score threshold unmet — pick a small deterministic sample, not all unexplored files.
@@ -812,6 +831,13 @@ def _candidate_signal_score(
         if "No obvious entry points found by filename heuristics." in unresolved_unknowns:
             score += 1
             reasons.append("test can clarify behavior when entry point is unclear")
+
+    # Most __init__.py files are empty package markers — push them down the
+    # queue so the agent doesn't spend early budget on them. They remain
+    # explorable (some do contain real code), just lower priority.
+    if Path(file_path).name == "__init__.py":
+        score -= 3
+        reasons.append("__init__.py (package marker, low priority)")
 
     return score, reasons
 
@@ -1335,14 +1361,31 @@ def _detect_python_package_roots(repo_path: Path, scanned_files: List[str]) -> L
     if has_src_layout:
         package_roots.append("src")
 
-    flat_package_dirs = sorted(
-        {
-            Path(path).parts[0]
-            for path in scanned_files
-            if len(Path(path).parts) >= 2 and path.endswith("/__init__.py")
-        }
-    )
-    if flat_package_dirs:
+    # Detect which top-level directories *contain* packages (i.e. directories
+    # whose immediate children have __init__.py). We pick the package root
+    # based on whether those packages live directly at the repo root, under a
+    # single wrapper directory (e.g. backend/), or are spread across multiple
+    # wrappers.
+    top_level_dirs = {
+        Path(path).parts[0]
+        for path in scanned_files
+        if len(Path(path).parts) >= 2 and path.endswith("/__init__.py")
+    }
+
+    if len(top_level_dirs) == 1:
+        # All __init__.py-containing dirs live under one top-level directory.
+        wrapper = next(iter(top_level_dirs))
+        # If the wrapper itself has an __init__.py it IS a package, accessible
+        # from the repo root as `wrapper.subpkg` — so the resolver root is ".".
+        # Otherwise the wrapper is a non-package container (e.g. "backend/")
+        # whose children are the actual top-level packages — the resolver root
+        # is the wrapper itself.
+        if f"{wrapper}/__init__.py" in scanned_files:
+            package_roots.append(".")
+        else:
+            package_roots.append(wrapper)
+    elif len(top_level_dirs) > 1:
+        # Packages span multiple top-level directories — root is the repo root.
         package_roots.append(".")
 
     unique_roots: List[str] = []
@@ -1396,6 +1439,13 @@ def _resolve_absolute_import(
 
 
 def _known_top_level_package_names(package_roots: List[Path], scanned_files: Set[str]) -> Set[str]:
+    """
+    Return the set of importable top-level names directly under each package
+    root. Strips the ``.py`` extension so single-file modules (e.g.
+    ``backend/config.py``) are recorded as ``"config"`` — matching the form
+    of import specifiers like ``import config``. Skips ``__init__`` since
+    ``import __init__`` is never valid.
+    """
     names: Set[str] = set()
     for package_root in package_roots:
         root_prefix = package_root.as_posix().strip(".")
@@ -1408,9 +1458,16 @@ def _known_top_level_package_names(package_roots: List[Path], scanned_files: Set
                 if parts[: len(root_parts)] != root_parts:
                     continue
                 if len(parts) > len(root_parts):
-                    names.add(parts[len(root_parts)])
+                    segment = parts[len(root_parts)]
+                else:
+                    continue
             else:
-                names.add(parts[0])
+                segment = parts[0]
+            if segment.endswith(".py"):
+                segment = segment[:-3]
+            if segment == "__init__":
+                continue
+            names.add(segment)
     return names
 
 
