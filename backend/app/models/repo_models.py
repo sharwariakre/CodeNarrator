@@ -71,6 +71,7 @@ class RepoAnalysisSnapshotResponse(BaseModel):
     unknowns: list[str]
     confidence: float
     analysis_state: AnalysisState
+    recommended_min_steps: int = 0
 
 
 class AnalysisLoopRequest(BaseModel):

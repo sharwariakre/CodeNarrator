@@ -65,6 +65,7 @@ export default function App() {
   const [token, setToken]           = useState("");
   const [showToken, setShowToken]   = useState(false);
   const [history, setHistory]       = useState<HistoryEntry[]>([]);
+  const [recommendedMinSteps, setRecommendedMinSteps] = useState(0);
 
   useEffect(() => {
     getHistory().then(setHistory).catch(() => {});
@@ -80,6 +81,7 @@ export default function App() {
     setReportHtml(null);
     setGlobalError(null);
     setSteps(makeSteps());
+    setRecommendedMinSteps(0);  // reset until snapshot computes it
 
     try {
       // 1. Ingest
@@ -91,6 +93,7 @@ export default function App() {
       // 2. Snapshot (needed to get repo_id and initial state)
       updateStep("snapshot", { status: "running" });
       const snapshot = await getSnapshot(localPath);
+      setRecommendedMinSteps(snapshot.recommended_min_steps ?? 0);
       updateStep("snapshot", {
         status: "done",
         detail: `${snapshot.repo_summary.file_count} files · ${snapshot.repo_summary.languages.join(", ")}`,
@@ -201,17 +204,24 @@ export default function App() {
       </div>
 
       <div className="depth-row">
-        {DEPTH_OPTIONS.map((opt, i) => (
-          <button
-            key={opt.label}
-            className={`depth-btn${depthIdx === i ? " depth-btn-active" : ""}`}
-            onClick={() => setDepthIdx(i)}
-            disabled={running}
-            title={opt.hint}
-          >
-            {opt.label}
-          </button>
-        ))}
+        {DEPTH_OPTIONS.map((opt, i) => {
+          const tooShort = recommendedMinSteps > 0 && opt.steps < recommendedMinSteps;
+          return (
+            <div key={opt.label} className="depth-option">
+              <button
+                className={`depth-btn${depthIdx === i ? " depth-btn-active" : ""}`}
+                onClick={() => setDepthIdx(i)}
+                disabled={running}
+                title={opt.hint}
+              >
+                {opt.label}
+              </button>
+              {tooShort && (
+                <span className="depth-warning">⚠ too short for this repo</span>
+              )}
+            </div>
+          );
+        })}
       </div>
 
       {anyStepStarted && (

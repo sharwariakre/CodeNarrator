@@ -41,6 +41,7 @@ export interface SnapshotResponse {
   unknowns: string[];
   confidence: number;
   analysis_state: AnalysisState;
+  recommended_min_steps: number;
 }
 
 export interface LoopResponse {

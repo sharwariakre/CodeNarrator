@@ -12,11 +12,14 @@ import pytest
 from app.services.analysis_snapshot_service import (
     _candidate_signal_score,
     _compute_dependency_graph_summary,
+    _detect_python_package_roots,
     _extract_imports_for_file,
     _extract_java_imports,
     _extract_go_imports,
     _extract_javascript_imports,
     _extract_python_imports,
+    _known_top_level_package_names,
+    _refresh_candidates_for_signal,
     _resolve_internal_import,
     _resolved_import_targets,
 )
@@ -1200,3 +1203,211 @@ class TestCandidateSignalScore:
             f"breadth ({breadth_score}: {breadth_reasons}) "
             f"should outscore chain ({chain_score}: {chain_reasons})"
         )
+
+
+# ---------------------------------------------------------------------------
+# _detect_python_package_roots and __init__.py candidate penalty
+# ---------------------------------------------------------------------------
+
+class TestPythonPackageRootDetection:
+    def test_returns_wrapper_for_nested_layout(self):
+        # Real-world case (aria-companion): all packages live under backend/,
+        # and backend/ itself is NOT a package. Root must be "backend" so the
+        # absolute resolver knows where to look for "db.database".
+        scanned = [
+            "backend/main.py",
+            "backend/config.py",
+            "backend/db/__init__.py",
+            "backend/db/database.py",
+            "backend/models/__init__.py",
+            "backend/models/user.py",
+            "backend/services/__init__.py",
+            "backend/routers/__init__.py",
+        ]
+        result = _detect_python_package_roots(Path("/fake"), scanned)
+        assert result == ["backend"]
+
+    def test_returns_dot_for_flat_layout(self):
+        # Packages live directly at the repo root.
+        scanned = [
+            "db/__init__.py",
+            "db/database.py",
+            "models/__init__.py",
+            "models/user.py",
+        ]
+        result = _detect_python_package_roots(Path("/fake"), scanned)
+        assert result == ["."]
+
+    def test_returns_dot_for_multiple_top_level_dirs(self):
+        # Two different wrapper directories each contain packages — no single
+        # wrapper to anchor; fall back to the repo root.
+        scanned = [
+            "backend/db/__init__.py",
+            "backend/db/database.py",
+            "frontend/utils/__init__.py",
+            "frontend/utils/helpers.py",
+        ]
+        result = _detect_python_package_roots(Path("/fake"), scanned)
+        assert result == ["."]
+
+    def test_wrapper_that_is_itself_a_package_returns_dot(self):
+        # If backend/__init__.py exists, "backend" is itself an importable
+        # package — absolute imports like "backend.db.database" must resolve
+        # from the repo root, so the root is "." (not "backend").
+        scanned = [
+            "backend/__init__.py",
+            "backend/main.py",
+            "backend/db/__init__.py",
+            "backend/db/database.py",
+        ]
+        result = _detect_python_package_roots(Path("/fake"), scanned)
+        assert result == ["."]
+
+    def test_known_top_level_names_strips_py_extension(self):
+        # `import config` from inside backend/ must be recognized — and the
+        # name set has to read "config", not "config.py", for the check to
+        # match the import specifier.
+        scanned = {
+            "backend/config.py",
+            "backend/main.py",
+            "backend/db/__init__.py",
+            "backend/db/database.py",
+        }
+        names = _known_top_level_package_names([Path("backend")], scanned)
+        assert "config" in names
+        assert "config.py" not in names
+        # Package directories still appear without extension (no change there).
+        assert "db" in names
+
+    def test_known_top_level_names_excludes_init(self):
+        # "__init__" is never a valid import specifier; including it in the
+        # names set would let `import __init__` (or similar invalid forms)
+        # falsely pass the "should attempt absolute resolution" guard.
+        scanned = {
+            "backend/db/__init__.py",
+            "backend/db/database.py",
+        }
+        names = _known_top_level_package_names([Path("backend")], scanned)
+        assert "__init__" not in names
+        assert "db" in names
+
+
+# ---------------------------------------------------------------------------
+# __init__.py candidate-score penalty
+# ---------------------------------------------------------------------------
+
+class TestInitPyPenalty:
+    def test_init_py_scores_three_lower_than_equivalent_module(self):
+        # Two candidates in the same (unvisited) directory, both Python,
+        # both role "module". The only difference: one is __init__.py.
+        # The penalty should be exactly -3.
+        state = {
+            "explored_files": ["src/foo.py"],
+            "inspected_facts": [
+                {
+                    "file_path": "src/foo.py",
+                    "language": "python",
+                    "role_hint": "module",
+                    "directory": "src",
+                    "line_count_bucket": "small",
+                    "imported_modules": [],
+                }
+            ],
+            "unknowns": [],
+            "current_summary": {
+                "top_level_dirs": ["src"],
+                "entry_points": [],
+                "languages": ["python"],
+            },
+            "dependency_edges": [],
+        }
+        file_languages = {
+            "src/foo.py": "python",
+            "src/bar/__init__.py": "python",
+            "src/bar/module.py": "python",
+        }
+
+        init_score, init_reasons = _candidate_signal_score(
+            state, "src/bar/__init__.py", file_languages, known_targets=Counter()
+        )
+        module_score, module_reasons = _candidate_signal_score(
+            state, "src/bar/module.py", file_languages, known_targets=Counter()
+        )
+
+        assert init_score == module_score - 3
+        # Reason string surfaces the penalty for debuggability.
+        assert any("__init__.py" in r for r in init_reasons)
+        assert not any("__init__.py" in r for r in module_reasons)
+
+
+# ---------------------------------------------------------------------------
+# Per-language coverage gate in _refresh_candidates_for_signal
+# ---------------------------------------------------------------------------
+
+class TestLanguageCoverageGate:
+    @staticmethod
+    def _make_repo_with_mixed_files(tmp: str, py_count: int, js_count: int):
+        repo = Path(tmp).resolve()
+        for i in range(py_count):
+            (repo / f"backend_{i}.py").write_text("")
+        for i in range(js_count):
+            (repo / f"frontend_{i}.js").write_text("")
+        return repo
+
+    @staticmethod
+    def _make_state(repo: Path, explored_files):
+        return {
+            "current_summary": {
+                "local_path": str(repo),
+                "top_level_dirs": [],
+                "entry_points": [],
+                "languages": ["python", "javascript"],
+            },
+            "explored_files": list(explored_files),
+            "candidate_files": [],
+            "inspected_facts": [
+                {
+                    "file_path": fp,
+                    "language": "python",
+                    "role_hint": "module",
+                    "directory": str(Path(fp).parent),
+                    "line_count_bucket": "small",
+                    "imported_modules": [],
+                }
+                for fp in explored_files
+            ],
+            "dependency_edges": [],
+            "package_roots": [],
+            "unknowns": [],
+        }
+
+    def test_low_dominant_coverage_filters_non_dominant_language(self):
+        # 10 Python files, 5 JS. Dominant = Python. Zero explored → 0% coverage.
+        # Gate should remove every JS candidate from the queue.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._make_repo_with_mixed_files(tmp, py_count=10, js_count=5)
+            state = self._make_state(repo, explored_files=[])
+
+            _refresh_candidates_for_signal(state, limit=8)
+
+            assert len(state["candidate_files"]) > 0, "should have at least some candidates"
+            for c in state["candidate_files"]:
+                assert c["file_path"].endswith(".py"), (
+                    f"JS candidate slipped past coverage gate: {c['file_path']}"
+                )
+
+    def test_high_dominant_coverage_allows_non_dominant_language(self):
+        # 10 Python files, 5 JS. Explore 6/10 Python (60% coverage ≥ 50%).
+        # The gate disengages and JS candidates can appear.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = self._make_repo_with_mixed_files(tmp, py_count=10, js_count=5)
+            explored = [f"backend_{i}.py" for i in range(6)]
+            state = self._make_state(repo, explored_files=explored)
+
+            _refresh_candidates_for_signal(state, limit=8)
+
+            extensions = {Path(c["file_path"]).suffix for c in state["candidate_files"]}
+            assert ".js" in extensions, (
+                f"JS candidates should appear once dominant coverage ≥ 0.5; "
+                f"got extensions: {extensions}"
+            )

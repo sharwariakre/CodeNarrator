@@ -86,6 +86,11 @@ async def get_repo_snapshot(payload: RepoAnalysisSnapshotRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
+    # Same formula the loop uses in _build_system_message / _tool_stop. Surface
+    # it so the UI can warn when the user's selected depth budget falls short.
+    file_count = snapshot.get("repo_summary", {}).get("file_count", 0)
+    snapshot["recommended_min_steps"] = min(15, max(6, int(file_count * 0.65)))
+
     return RepoAnalysisSnapshotResponse(**snapshot)
 
 
