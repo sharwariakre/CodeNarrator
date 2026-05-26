@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codenarrator-ai"
-version = "0.1.1"
+version = "0.1.2"
 description = "Autonomous codebase understanding agent — clone a repo, get an architecture report."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -27,3 +27,8 @@ dev = ["pytest"]
 where = ["."]
 include = ["codenarrator*"]
 exclude = ["backend*", "frontend*", "tests*"]
+
+[project.urls]
+Homepage = "https://github.com/sharwariakre/CodeNarrator"
+Source = "https://github.com/sharwariakre/CodeNarrator"
+Issues = "https://github.com/sharwariakre/CodeNarrator/issues"
