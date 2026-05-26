@@ -9,7 +9,7 @@ description = "Autonomous codebase understanding agent — clone a repo, get an 
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{ name = "sharwariakre" }]
-license = { text = "MIT" }
+license = "MIT"
 dependencies = [
     "fastapi",
     "uvicorn[standard]",
