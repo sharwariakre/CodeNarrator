@@ -11,7 +11,7 @@ from codenarrator.core.config import settings
 
 LOGGER = logging.getLogger(__name__)
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_URL = f"{settings.OLLAMA_HOST}/api/generate"
 OLLAMA_MODEL = settings.OLLAMA_MODEL
 
 

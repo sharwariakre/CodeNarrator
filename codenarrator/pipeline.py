@@ -110,13 +110,12 @@ def analyze(
         # fallback for key_dependencies fires inside on Ollama failure).
         interpretation = interpret_architecture(final_state)
 
-        # Step 5 — render report. Default to <data>/reports next to the
-        # repo / cache dirs from settings so output lands alongside the
-        # FastAPI flow's reports.
+        # Step 5 — render report. Default to <DATA_DIR>/reports so reports
+        # sit alongside clones and cache under the user data dir.
         if output_dir:
             out_dir = Path(output_dir).expanduser().resolve()
         else:
-            out_dir = settings.REPO_BASE_DIR.parent / "reports"
+            out_dir = Path(settings.DATA_DIR) / "reports"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         report_path = out_dir / f"{_slug(Path(local_path).name)}-report.html"
