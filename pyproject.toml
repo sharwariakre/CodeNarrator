@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "codenarrator"
+name = "codenarrator-ai"
 version = "0.1.0"
 description = "Autonomous codebase understanding agent — clone a repo, get an architecture report."
 readme = "README.md"
