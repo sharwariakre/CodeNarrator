@@ -12,13 +12,9 @@ Give it a Git URL and it produces an interactive HTML dependency graph plus a na
 
 ## Installation
 
-> **Not on PyPI yet.** Install from a local clone:
->
-> ```bash
-> git clone https://github.com/sharwariakre/CodeNarrator
-> cd CodeNarrator
-> pip install -e .
-> ```
+```bash
+pip install codenarrator-ai
+```
 
 ## Usage
 
@@ -109,10 +105,12 @@ The model produces a natural-language architecture summary alongside the determi
 
 ## Local development
 
+> *For contributors only.* End users should use `pip install codenarrator-ai` above.
+
 ```bash
 git clone https://github.com/sharwariakre/CodeNarrator
 cd CodeNarrator
-pip install -e .
+pip install -e .  # for local development
 
 # Start Ollama (separate terminal)
 ollama serve
