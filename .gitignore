@@ -7,3 +7,6 @@ __pycache__/
 *.pyd
 backend/data/*
 backend/tmp/
+*.egg-info/
+dist/
+build/
