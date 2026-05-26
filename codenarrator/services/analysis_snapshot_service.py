@@ -5,10 +5,10 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
-from app.services.repo_scanner import EXTENSION_LANGUAGE_MAP
-from app.services.repo_metadata import ENTRY_POINT_FILES, KNOWN_TOP_LEVEL_DIRS
-from app.services.repo_metadata import extract_repo_metadata
-from app.services.repo_scanner import scan_repository
+from codenarrator.services.repo_scanner import EXTENSION_LANGUAGE_MAP
+from codenarrator.services.repo_metadata import ENTRY_POINT_FILES, KNOWN_TOP_LEVEL_DIRS
+from codenarrator.services.repo_metadata import extract_repo_metadata
+from codenarrator.services.repo_scanner import scan_repository
 
 
 def build_analysis_snapshot(repo_path: Path) -> Dict:

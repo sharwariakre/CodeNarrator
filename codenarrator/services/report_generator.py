@@ -5,7 +5,7 @@ import urllib.error
 from pathlib import Path
 from typing import Dict
 
-from app.services.analysis_snapshot_service import _compute_dependency_graph_summary
+from codenarrator.services.analysis_snapshot_service import _compute_dependency_graph_summary
 
 LOGGER = logging.getLogger(__name__)
 _D3_CDN = "https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"

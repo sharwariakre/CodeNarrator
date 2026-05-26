@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from app.api.v1.routes_health import router as health_router
 from app.api.v1.routes_repo import router as repo_router
-from app.services.report_generator import _get_d3_js
+from codenarrator.services.report_generator import _get_d3_js
 
 app = FastAPI(
     title="CodeNarrator API",

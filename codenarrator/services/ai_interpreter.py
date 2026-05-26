@@ -6,8 +6,8 @@ import urllib.error
 import urllib.request
 from typing import Dict, Optional
 
-from app.services.analysis_snapshot_service import _compute_dependency_graph_summary
-from app.core.config import settings
+from codenarrator.services.analysis_snapshot_service import _compute_dependency_graph_summary
+from codenarrator.core.config import settings
 
 LOGGER = logging.getLogger(__name__)
 

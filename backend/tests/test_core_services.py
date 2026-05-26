@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from app.services.analysis_snapshot_service import (
+from codenarrator.services.analysis_snapshot_service import (
     _candidate_signal_score,
     _compute_dependency_graph_summary,
     _detect_python_package_roots,
@@ -23,22 +23,22 @@ from app.services.analysis_snapshot_service import (
     _resolve_internal_import,
     _resolved_import_targets,
 )
-from app.services.agentic_analysis_service import (
+from codenarrator.services.agentic_analysis_service import (
     _build_language_guidance,
     _is_noise_file,
     _next_unexplored,
     _nudge_message,
 )
-from app.services import report_generator
-from app.services.report_generator import generate_html_report
-from app.services import ai_interpreter
-from app.services.ai_interpreter import (
+from codenarrator.services import report_generator
+from codenarrator.services.report_generator import generate_html_report
+from codenarrator.services import ai_interpreter
+from codenarrator.services.ai_interpreter import (
     _build_fallback_key_dependencies,
     _build_prompt,
     _validate_interpretation,
     interpret_architecture,
 )
-from app.services.analysis_state_store import (
+from codenarrator.services.analysis_state_store import (
     delete_state,
     load_state,
     save_state,
@@ -1025,7 +1025,7 @@ class TestDeleteStateAndForceRefresh:
         # Pin the git hash so load_state's staleness check would normally
         # succeed — this isolates the delete behavior from staleness logic.
         monkeypatch.setattr(
-            "app.services.analysis_state_store._get_git_commit_hash",
+            "codenarrator.services.analysis_state_store._get_git_commit_hash",
             lambda local_path: "abc123",
         )
         with tempfile.TemporaryDirectory() as tmp:

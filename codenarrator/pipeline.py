@@ -12,37 +12,20 @@ the friendly facade.
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 from typing import Optional
 
-# Make the backend's ``app.*`` modules importable from this package without
-# requiring an installed-mode layout. This must happen before the first
-# ``from app...`` import below.
-_BACKEND_ROOT = Path(__file__).resolve().parent.parent / "backend"
-if str(_BACKEND_ROOT) not in sys.path:
-    sys.path.insert(0, str(_BACKEND_ROOT))
+from codenarrator.core.config import settings
 
-# Service-layer imports (after the sys.path insertion).
-from app.core.config import settings  # noqa: E402
-from app.services import agentic_analysis_service as _agentic_svc  # noqa: E402
-from app.services import ai_interpreter as _interpreter_svc  # noqa: E402
-from app.services.agentic_analysis_service import run_agentic_analysis_loop  # noqa: E402
-from app.services.ai_interpreter import interpret_architecture  # noqa: E402
-from app.services.analysis_snapshot_service import build_analysis_snapshot  # noqa: E402
-from app.services.git_service import clone_or_update_repo  # noqa: E402
-from app.services.report_generator import generate_html_report  # noqa: E402
+from codenarrator.services import agentic_analysis_service as _agentic_svc
+from codenarrator.services import ai_interpreter as _interpreter_svc
+from codenarrator.services.agentic_analysis_service import run_agentic_analysis_loop
+from codenarrator.services.ai_interpreter import interpret_architecture
+from codenarrator.services.analysis_snapshot_service import build_analysis_snapshot
+from codenarrator.services.git_service import clone_or_update_repo
+from codenarrator.services.report_generator import generate_html_report
 
 from codenarrator.result import AnalysisResult
-
-
-# Anchor data paths to the canonical backend/data/ tree so the CLI pipeline
-# writes clones, cache, and reports into the same places the FastAPI flow
-# does — both share the same backing store.
-# (There is no REPORTS_DIR setting; the pipeline writes reports by defaulting
-# analyze()'s output_dir to _BACKEND_ROOT / "data" / "reports".)
-settings.REPO_BASE_DIR = _BACKEND_ROOT / "data" / "repos"
-settings.ANALYSIS_CACHE_DIR = _BACKEND_ROOT / "data" / "analysis_cache"
 
 
 # Map the friendly depth name to a step budget. Matches the UI's DEPTH_OPTIONS.
@@ -127,12 +110,13 @@ def analyze(
         # fallback for key_dependencies fires inside on Ollama failure).
         interpretation = interpret_architecture(final_state)
 
-        # Step 5 — render report. Default to the canonical backend/data/reports
-        # directory so output lands alongside the FastAPI flow's reports.
+        # Step 5 — render report. Default to <data>/reports next to the
+        # repo / cache dirs from settings so output lands alongside the
+        # FastAPI flow's reports.
         if output_dir:
             out_dir = Path(output_dir).expanduser().resolve()
         else:
-            out_dir = _BACKEND_ROOT / "data" / "reports"
+            out_dir = settings.REPO_BASE_DIR.parent / "reports"
         out_dir.mkdir(parents=True, exist_ok=True)
 
         report_path = out_dir / f"{_slug(Path(local_path).name)}-report.html"

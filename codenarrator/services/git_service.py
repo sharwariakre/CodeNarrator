@@ -8,7 +8,7 @@ import shutil
 
 from git import Repo, GitCommandError
 
-from app.core.config import settings
+from codenarrator.core.config import settings
 
 
 class GitCloneError(Exception):

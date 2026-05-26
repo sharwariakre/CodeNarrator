@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import ollama
 
-from app.services.analysis_snapshot_service import (
+from codenarrator.services.analysis_snapshot_service import (
     _compute_dependency_graph_summary,
     _copy_state,
     _inspect_file,
@@ -28,8 +28,8 @@ from app.services.analysis_snapshot_service import (
     _resolved_import_targets,
     _update_confidence,
 )
-from app.services.repo_scanner import scan_repository
-from app.core.config import settings
+from codenarrator.services.repo_scanner import scan_repository
+from codenarrator.core.config import settings
 
 LOGGER = logging.getLogger(__name__)
 
