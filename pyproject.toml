@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codenarrator"
+version = "0.1.0"
+description = "Autonomous codebase understanding agent — clone a repo, get an architecture report."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{ name = "sharwariakre" }]
+license = { text = "MIT" }
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic",
+    "pydantic-settings",
+    "gitpython",
+    "ollama",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["codenarrator*"]
+exclude = ["backend*", "frontend*", "tests*"]
