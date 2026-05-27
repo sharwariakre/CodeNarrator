@@ -21,7 +21,14 @@ pip install codenarrator-ai
 ```python
 from codenarrator import analyze
 
-result = analyze("https://github.com/user/repo")
+result = analyze(
+    "https://github.com/user/repo",  # replace with any public GitHub URL
+    depth="deep"
+)
+
+print("Report path:", result.report_path)
+print("Explored files:", len(result.explored_files))
+print("Internal edges:", len(result.dependency_graph))
 
 result.show()                  # opens the HTML report in your browser
 result.to_html("report.html")  # save the HTML to a file
