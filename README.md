@@ -103,6 +103,13 @@ Two layers:
 
 The model produces a natural-language architecture summary alongside the deterministic graph. If the LLM times out or returns junk, the report still renders from the deterministic layer.
 
+## Roadmap
+
+- Pluggable LLM backends (OpenAI, Anthropic, any OpenAI-compatible API)
+- CLI: `codenarrator analyze <url>`
+- Full dependency graph support for Java, Go, Rust, C/C++
+- Incremental analysis — only re-explore files changed since last run
+
 ## Local development
 
 > *For contributors only.* End users should use `pip install codenarrator-ai` above.

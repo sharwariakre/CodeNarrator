@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codenarrator-ai"
-version = "0.1.2"
+version = "0.1.3"
 description = "Autonomous codebase understanding agent — clone a repo, get an architecture report."
 readme = "README.md"
 requires-python = ">=3.11"
