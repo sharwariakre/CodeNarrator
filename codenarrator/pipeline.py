@@ -17,12 +17,11 @@ from typing import Optional
 
 from codenarrator.core.config import settings
 
-from codenarrator.services import agentic_analysis_service as _agentic_svc
-from codenarrator.services import ai_interpreter as _interpreter_svc
 from codenarrator.services.agentic_analysis_service import run_agentic_analysis_loop
 from codenarrator.services.ai_interpreter import interpret_architecture
 from codenarrator.services.analysis_snapshot_service import build_analysis_snapshot
 from codenarrator.services.git_service import clone_or_update_repo
+from codenarrator.services.llm import OllamaProvider
 from codenarrator.services.report_generator import generate_html_report
 
 from codenarrator.result import AnalysisResult
@@ -85,46 +84,39 @@ def analyze(
         git_token=api_key,
     )
 
-    # The service modules captured ``settings.OLLAMA_MODEL`` at import time
-    # into their own module-level ``OLLAMA_MODEL`` constants — so to honour
-    # ``model=...`` we have to patch the modules directly, not just settings.
-    _orig_settings_model = settings.OLLAMA_MODEL
-    _orig_agentic_model = _agentic_svc.OLLAMA_MODEL
-    _orig_interpreter_model = _interpreter_svc.OLLAMA_MODEL
+    # Build the LLM provider ONCE for this run. The model override is honoured
+    # by constructing the provider with the chosen model — no settings
+    # mutation, no module-level monkey-patching.
+    provider = OllamaProvider(
+        model=model or settings.OLLAMA_MODEL,
+        host=settings.OLLAMA_HOST,
+    )
 
-    if model:
-        settings.OLLAMA_MODEL = model
-        _agentic_svc.OLLAMA_MODEL = model
-        _interpreter_svc.OLLAMA_MODEL = model
+    # Step 2 — deterministic snapshot.
+    snapshot = build_analysis_snapshot(local_path)
+    initial_state = snapshot["analysis_state"]
 
-    try:
-        # Step 2 — deterministic snapshot.
-        snapshot = build_analysis_snapshot(local_path)
-        initial_state = snapshot["analysis_state"]
+    # Step 3 — agentic exploration loop.
+    loop_out = run_agentic_analysis_loop(
+        initial_state, max_steps=max_steps, provider=provider,
+    )
+    final_state = loop_out["final_state"]
 
-        # Step 3 — agentic exploration loop.
-        loop_out = run_agentic_analysis_loop(initial_state, max_steps=max_steps)
-        final_state = loop_out["final_state"]
+    # Step 4 — AI interpretation (always returns a dict; deterministic
+    # fallback for key_dependencies fires inside on LLM failure).
+    interpretation = interpret_architecture(final_state, provider=provider)
 
-        # Step 4 — AI interpretation (always returns a dict; deterministic
-        # fallback for key_dependencies fires inside on Ollama failure).
-        interpretation = interpret_architecture(final_state)
+    # Step 5 — render report. Default to <DATA_DIR>/reports so reports
+    # sit alongside clones and cache under the user data dir.
+    if output_dir:
+        out_dir = Path(output_dir).expanduser().resolve()
+    else:
+        out_dir = Path(settings.DATA_DIR) / "reports"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-        # Step 5 — render report. Default to <DATA_DIR>/reports so reports
-        # sit alongside clones and cache under the user data dir.
-        if output_dir:
-            out_dir = Path(output_dir).expanduser().resolve()
-        else:
-            out_dir = Path(settings.DATA_DIR) / "reports"
-        out_dir.mkdir(parents=True, exist_ok=True)
-
-        report_path = out_dir / f"{_slug(Path(local_path).name)}-report.html"
-        report_path = generate_html_report(final_state, interpretation, report_path)
-        report_html = report_path.read_text(encoding="utf-8")
-    finally:
-        settings.OLLAMA_MODEL = _orig_settings_model
-        _agentic_svc.OLLAMA_MODEL = _orig_agentic_model
-        _interpreter_svc.OLLAMA_MODEL = _orig_interpreter_model
+    report_path = out_dir / f"{_slug(Path(local_path).name)}-report.html"
+    report_path = generate_html_report(final_state, interpretation, report_path)
+    report_html = report_path.read_text(encoding="utf-8")
 
     return AnalysisResult(
         state=final_state,

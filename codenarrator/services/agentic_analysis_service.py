@@ -1,18 +1,18 @@
 """
-Agentic analysis loop: an Ollama model drives file exploration via tool calls
+Agentic analysis loop: a model drives file exploration via tool calls
 instead of hardcoded heuristic scoring. Drop-in replacement for run_analysis_loop —
 returns the same dict shape so the route needs no changes to its response handling.
+
+The LLM transport is abstracted behind :class:`~codenarrator.services.llm.LLMProvider`;
+this module knows nothing about Ollama directly. The provider is injected by
+the caller (currently :mod:`codenarrator.pipeline`).
 """
 import json
 import logging
 import os
 import re
-import time
-from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple
-
-import ollama
+from typing import Callable, Dict, List, Optional, Tuple
 
 from codenarrator.services.analysis_snapshot_service import (
     _compute_dependency_graph_summary,
@@ -28,12 +28,11 @@ from codenarrator.services.analysis_snapshot_service import (
     _resolved_import_targets,
     _update_confidence,
 )
+from codenarrator.services.llm import ChatResponse, LLMProvider
 from codenarrator.services.repo_scanner import scan_repository
-from codenarrator.core.config import settings
 
 LOGGER = logging.getLogger(__name__)
 
-OLLAMA_MODEL = settings.OLLAMA_MODEL
 MAX_SEARCH_RESULTS = 10
 MAX_FILE_PREVIEW_LINES = 40
 
@@ -174,13 +173,16 @@ def run_agentic_analysis_loop(
     initial_state: Dict,
     max_steps: int = 15,
     on_progress: Optional[Callable[[Dict], None]] = None,
+    *,
+    provider: LLMProvider,
 ) -> Dict:
     """
     Agentic replacement for run_analysis_loop.
 
-    An Ollama model drives exploration via tool calls. The model sees a running
-    message history with tool results fed back each step, so it can reason about
-    what it has learned before deciding what to explore next.
+    The model drives exploration via tool calls through the injected
+    ``provider``. The model sees a running message history with tool results
+    fed back each step, so it can reason about what it has learned before
+    deciding what to explore next.
 
     Returns the same dict shape as run_analysis_loop for drop-in compatibility.
     """
@@ -264,17 +266,29 @@ def run_agentic_analysis_loop(
         if len(messages) > _MAX_HISTORY + 1:
             messages = [messages[0]] + messages[-_MAX_HISTORY:]
 
-        response = _call_model_with_retry(messages, retries=2)
-        if response is None:
-            LOGGER.warning("Step %d: Ollama unavailable after retries, stopping.", step)
+        try:
+            response: ChatResponse = provider.chat(
+                messages=messages,
+                tools=_TOOLS,
+                temperature=0.2,
+            )
+        except Exception as exc:
+            LOGGER.warning("Step %d: LLM unavailable after retries (%s), stopping.", step, exc)
             state["stop_reason"] = "Ollama unavailable after retries."
             step_trace.append(_trace_entry(step, None, state))
             break
 
         # Append assistant turn to history so the model sees its own reasoning.
-        messages.append(response.message)
+        # Reconstruct an OpenAI/Ollama-shape assistant message from ChatResponse.
+        assistant_msg: Dict = {"role": "assistant", "content": response.content}
+        if response.tool_calls:
+            assistant_msg["tool_calls"] = [
+                {"function": {"name": tc.name, "arguments": tc.arguments}}
+                for tc in response.tool_calls
+            ]
+        messages.append(assistant_msg)
 
-        tool_calls = _extract_tool_calls(response)
+        tool_calls = response.tool_calls
         if not tool_calls:
             LOGGER.info("Step %d: model returned no tool call — injecting nudge.", step)
             messages.append(_nudge_message(state))
@@ -291,8 +305,8 @@ def run_agentic_analysis_loop(
             result, side_effect = _dispatch_tool(
                 state=state,
                 insights=architecture_insights,
-                tool_name=tc.function.name,
-                args=tc.function.arguments or {},
+                tool_name=tc.name,
+                args=tc.arguments or {},
             )
             # Feed result back so the model can reason about what it learned.
             messages.append({"role": "tool", "content": result})
@@ -722,86 +736,6 @@ def _tool_stop(state: Dict, reason: str) -> Tuple[str, Optional[str]]:
 
     state["stop_reason"] = reason or "Agent decided analysis is complete."
     return f"Analysis stopped: {state['stop_reason']}", "stop"
-
-
-# ---------------------------------------------------------------------------
-# Ollama call with retry + content-fallback tool-call parsing
-# ---------------------------------------------------------------------------
-
-@dataclass
-class _ToolFunction:
-    name: str
-    arguments: Dict[str, Any]
-
-
-@dataclass
-class _ToolCall:
-    function: _ToolFunction
-
-
-def _extract_tool_calls(response) -> List[_ToolCall]:
-    """
-    qwen2.5-coder returns tool calls as JSON in message.content instead of
-    populating message.tool_calls. Try tool_calls first; fall back to parsing content.
-
-    The model may wrap the JSON in a markdown code block with surrounding prose,
-    so we search for the JSON object/array anywhere in the content.
-    """
-    if response.message.tool_calls:
-        return response.message.tool_calls
-
-    content = (response.message.content or "").strip()
-    if not content:
-        return []
-
-    # Try to find JSON inside a markdown code fence first.
-    fence_match = re.search(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", content, re.DOTALL)
-    if fence_match:
-        raw = fence_match.group(1)
-    else:
-        # Fall back: find the first { or [ and try to parse from there.
-        match = re.search(r"(\{|\[)", content)
-        if not match:
-            return []
-        raw = content[match.start():]
-
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-
-    # Handle both a single call {"name":..., "arguments":...}
-    # and an array of calls.
-    if isinstance(parsed, dict) and "name" in parsed:
-        parsed = [parsed]
-    if not isinstance(parsed, list):
-        return []
-
-    calls = []
-    for item in parsed:
-        name = item.get("name") or item.get("function", {}).get("name")
-        args = item.get("arguments") or item.get("function", {}).get("arguments") or {}
-        if name:
-            calls.append(_ToolCall(function=_ToolFunction(name=name, arguments=args)))
-    return calls
-
-
-def _call_model_with_retry(messages: List, retries: int = 2):
-    for attempt in range(retries + 1):
-        try:
-            return ollama.chat(
-                model=OLLAMA_MODEL,
-                messages=messages,
-                tools=_TOOLS,
-                options={"temperature": 0.2},
-            )
-        except Exception as exc:
-            LOGGER.warning(
-                "Ollama call failed (attempt %d/%d): %s", attempt + 1, retries + 1, exc
-            )
-            if attempt < retries:
-                time.sleep(1 * (attempt + 1))
-    return None
 
 
 # ---------------------------------------------------------------------------

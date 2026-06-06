@@ -1,21 +1,20 @@
 import json
 import logging
 import re
-import time
-import urllib.error
-import urllib.request
 from typing import Dict, Optional
 
-from codenarrator.services.analysis_snapshot_service import _compute_dependency_graph_summary
 from codenarrator.core.config import settings
+from codenarrator.services.analysis_snapshot_service import _compute_dependency_graph_summary
+from codenarrator.services.llm import LLMProvider
 
 LOGGER = logging.getLogger(__name__)
 
-OLLAMA_URL = f"{settings.OLLAMA_HOST}/api/generate"
-OLLAMA_MODEL = settings.OLLAMA_MODEL
 
-
-def interpret_architecture(analysis_state: Dict) -> Dict:
+def interpret_architecture(
+    analysis_state: Dict,
+    *,
+    provider: Optional[LLMProvider] = None,
+) -> Dict:
     """
     AI-assisted interpretation with deterministic fallbacks.
 
@@ -30,7 +29,12 @@ def interpret_architecture(analysis_state: Dict) -> Dict:
     try:
         payload = _build_interpretation_payload(analysis_state, graph_summary)
         prompt = _build_prompt(payload)
-        response_text = _call_ollama(prompt)
+        if provider is not None:
+            response_text = _send_prompt(provider, prompt)
+        else:
+            # Backward-compat path: build a default OllamaProvider from settings.
+            # The shim function remains monkey-patchable from tests.
+            response_text = _call_ollama(prompt)
         parsed = _parse_interpretation_json(response_text)
         if parsed is not None:
             explored_paths = {
@@ -141,41 +145,27 @@ def _build_prompt(payload: Dict) -> str:
     )
 
 
-_RETRY_DELAYS = [1, 2]  # seconds between attempts; total = 3 tries
+def _send_prompt(provider: LLMProvider, prompt: str) -> str:
+    """Single-turn completion: send ``prompt`` as one user message and return text."""
+    response = provider.chat(
+        messages=[{"role": "user", "content": prompt}],
+        tools=None,
+        temperature=0.1,
+    )
+    return response.content
 
 
 def _call_ollama(prompt: str) -> str:
-    request_body = {
-        "model": OLLAMA_MODEL,
-        "prompt": prompt,
-        "stream": False,
-        "options": {
-            "temperature": 0.1,
-        },
-    }
-
-    last_exc: Exception = RuntimeError("No attempts made")
-    for attempt, _ in enumerate(["first"] + _RETRY_DELAYS):
-        if attempt > 0:
-            delay = _RETRY_DELAYS[attempt - 1]
-            LOGGER.warning("Ollama call failed (attempt %d), retrying in %ds…", attempt, delay)
-            time.sleep(delay)
-
-        request = urllib.request.Request(
-            OLLAMA_URL,
-            data=json.dumps(request_body).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=180) as response:
-                raw = response.read().decode("utf-8")
-            payload = json.loads(raw)
-            return payload.get("response", "")
-        except urllib.error.URLError as exc:
-            last_exc = exc
-
-    raise RuntimeError(f"Ollama request failed after {len(_RETRY_DELAYS) + 1} attempts: {last_exc}") from last_exc
+    """
+    Backward-compat shim: build a default :class:`OllamaProvider` from
+    ``settings`` and route a single-turn prompt through it. Kept so
+    callers that don't pass ``provider=`` (and tests that monkey-patch
+    this name) continue to work.
+    """
+    # Import here to avoid a circular import at module load.
+    from codenarrator.services.llm import OllamaProvider
+    provider = OllamaProvider(model=settings.OLLAMA_MODEL, host=settings.OLLAMA_HOST)
+    return _send_prompt(provider, prompt)
 
 
 def _parse_interpretation_json(response_text: str) -> Optional[Dict]:
