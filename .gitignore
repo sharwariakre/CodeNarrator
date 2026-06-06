@@ -10,3 +10,8 @@ backend/tmp/
 *.egg-info/
 dist/
 build/
+
+# Scratch artifacts at repo root
+/graph.json
+/report.html
+/test_real.py

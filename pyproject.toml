@@ -11,8 +11,6 @@ requires-python = ">=3.11"
 authors = [{ name = "sharwariakre" }]
 license = "MIT"
 dependencies = [
-    "fastapi",
-    "uvicorn[standard]",
     "pydantic",
     "pydantic-settings",
     "gitpython",
@@ -21,6 +19,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+web = ["fastapi", "uvicorn[standard]"]
 dev = ["pytest"]
 
 [tool.setuptools.packages.find]
